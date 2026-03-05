@@ -24,6 +24,9 @@ jobs:
     name: Build (matrix)
     runs-on: ${{ matrix.os }}
     needs: preflight
+    env:
+      CODE_SIGN_CERT: ${{ secrets.CODE_SIGN_CERT }}
+      CODE_SIGN_CERT_PASSWORD: ${{ secrets.CODE_SIGN_CERT_PASSWORD }}
     strategy:
       fail-fast: false
       matrix:
@@ -88,26 +91,51 @@ jobs:
         shell: bash
         run: |
           cd dist
-          # normalize filenames
-          CLIENT_BIN="MasterDnsVPN_Client_${{ matrix.platform }}_${{ matrix.arch }}${{ matrix.ext }}"
-          SERVER_BIN="MasterDnsVPN_Server_${{ matrix.platform }}_${{ matrix.arch }}${{ matrix.ext }}"
-          # create zip on Windows and zip+tar on others
+          # compute display-friendly uppercase arch
+          ARCH_UPPER=$(echo "${{ matrix.arch }}" | tr '[:lower:]' '[:upper:]')
+          PLATFORM="${{ matrix.platform }}"
+
+          CLIENT_DESIRED_BASE="MasterDnsVPN_Client_${PLATFORM}_${ARCH_UPPER}"
+          SERVER_DESIRED_BASE="MasterDnsVPN_Server_${PLATFORM}_${ARCH_UPPER}"
+
+          CLIENT_ORIG="MasterDnsVPN_Client_${{ matrix.platform }}_${{ matrix.arch }}${{ matrix.ext }}"
+          SERVER_ORIG="MasterDnsVPN_Server_${{ matrix.platform }}_${{ matrix.arch }}${{ matrix.ext }}"
+
+          # rename built binaries to desired names (preserve extension)
+          if [ -f "${CLIENT_ORIG}" ]; then
+            mv "${CLIENT_ORIG}" "${CLIENT_DESIRED_BASE}${{ matrix.ext }}" || true
+          fi
+          if [ -f "${SERVER_ORIG}" ]; then
+            mv "${SERVER_ORIG}" "${SERVER_DESIRED_BASE}${{ matrix.ext }}" || true
+          fi
+
+          # prepare package names
+          CLIENT_ZIP="${CLIENT_DESIRED_BASE}.zip"
+          SERVER_ZIP="${SERVER_DESIRED_BASE}.zip"
+          CLIENT_TAR="${CLIENT_DESIRED_BASE}.tar.gz"
+          SERVER_TAR="${SERVER_DESIRED_BASE}.tar.gz"
+
+          # choose toml files
+          CLIENT_TOML="client_config.toml"
+          SERVER_TOML="server_config.toml"
+
+          # package for Windows using PowerShell's Compress-Archive when on Windows runner
           if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            powershell -Command "Compress-Archive -Path '${CLIENT_BIN}','client_config.toml' -DestinationPath '${CLIENT_BIN}.zip'"
-            powershell -Command "Compress-Archive -Path '${SERVER_BIN}','server_config.toml' -DestinationPath '${SERVER_BIN}.zip'"
+            powershell -Command "Compress-Archive -Path '${CLIENT_DESIRED_BASE}${{ matrix.ext}}','${CLIENT_TOML}' -DestinationPath '${CLIENT_ZIP}'"
+            powershell -Command "Compress-Archive -Path '${SERVER_DESIRED_BASE}${{ matrix.ext}}','${SERVER_TOML}' -DestinationPath '${SERVER_ZIP}'"
           else
-            zip -j "${CLIENT_BIN}.zip" "${CLIENT_BIN}" client_config.toml || true
-            tar -czf "${CLIENT_BIN}.tar.gz" "${CLIENT_BIN}" client_config.toml || true
-            zip -j "${SERVER_BIN}.zip" "${SERVER_BIN}" server_config.toml || true
-            tar -czf "${SERVER_BIN}.tar.gz" "${SERVER_BIN}" server_config.toml || true
+            zip -j "${CLIENT_ZIP}" "${CLIENT_DESIRED_BASE}${{ matrix.ext }}" "${CLIENT_TOML}" || true
+            tar -czf "${CLIENT_TAR}" "${CLIENT_DESIRED_BASE}${{ matrix.ext }}" "${CLIENT_TOML}" || true
+            zip -j "${SERVER_ZIP}" "${SERVER_DESIRED_BASE}${{ matrix.ext }}" "${SERVER_TOML}" || true
+            tar -czf "${SERVER_TAR}" "${SERVER_DESIRED_BASE}${{ matrix.ext }}" "${SERVER_TOML}" || true
           fi
 
       - name: Code sign Windows executables (optional)
-        if: ${{ secrets.CODE_SIGN_CERT != '' && matrix.os == 'windows-latest' }}
+        if: ${{ env.CODE_SIGN_CERT != '' && matrix.os == 'windows-latest' }}
         shell: powershell
         run: |
           Write-Host "Decoding CODE_SIGN_CERT to cert.pfx"
-          [System.IO.File]::WriteAllBytes('cert.pfx', [Convert]::FromBase64String('${{ secrets.CODE_SIGN_CERT }}'))
+          [System.IO.File]::WriteAllBytes('cert.pfx', [Convert]::FromBase64String('${{ env.CODE_SIGN_CERT }}'))
           if (Test-Path 'cert.pfx') {
             $signtool = Get-Command signtool.exe -ErrorAction SilentlyContinue
             if ($null -ne $signtool) {
@@ -115,20 +143,20 @@ jobs:
               $files = Get-ChildItem -Path .\ -Filter "*Windows*amd64*${{ matrix.ext }}*" -Recurse -File
               foreach ($f in $files) {
                 Write-Host "Signing $($f.FullName)"
-                & $signtool.Path sign /f cert.pfx /p "${{ secrets.CODE_SIGN_CERT_PASSWORD }}" /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 $f.FullName
+                & $signtool.Path sign /f cert.pfx /p "${{ env.CODE_SIGN_CERT_PASSWORD }}" /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 $f.FullName
               }
             } else { Write-Host "signtool not found on runner; skipping Windows signing." }
           } else { Write-Host "cert.pfx not found after decode; skipping signing." }
 
       - name: Code sign macOS executables (optional)
-        if: ${{ secrets.CODE_SIGN_CERT != '' && matrix.os == 'macos-latest' }}
+        if: ${{ env.CODE_SIGN_CERT != '' && matrix.os == 'macos-latest' }}
         shell: bash
         run: |
           echo "Decoding CODE_SIGN_CERT to cert.pfx"
-          echo "${{ secrets.CODE_SIGN_CERT }}" | base64 -d > cert.pfx
+          echo "${{ env.CODE_SIGN_CERT }}" | base64 -d > cert.pfx
           if [ -f cert.pfx ]; then
             echo "Importing cert.pfx into login keychain (may require interactive access)"
-            security import cert.pfx -k ~/Library/Keychains/login.keychain -P "${{ secrets.CODE_SIGN_CERT_PASSWORD }}" -T /usr/bin/codesign || true
+            security import cert.pfx -k ~/Library/Keychains/login.keychain -P "${{ env.CODE_SIGN_CERT_PASSWORD }}" -T /usr/bin/codesign || true
             # attempt to find an identity and codesign
             IDENTITY=$(security find-identity -v -p codesigning | head -n1 | awk -F '"' '{print $2}') || true
             if [ -n "$IDENTITY" ]; then
@@ -150,8 +178,8 @@ jobs:
         with:
           name: build-artifacts-${{ matrix.platform }}-${{ matrix.arch }}
           path: |
-            dist/*${{ matrix.platform }}*${{ matrix.arch }}*.zip
-            dist/*${{ matrix.platform }}*${{ matrix.arch }}*.tar.gz
+            dist/*.zip
+            dist/*.tar.gz
 
   release:
     name: Create Release and attach artifacts
