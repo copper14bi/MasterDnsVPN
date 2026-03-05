@@ -486,10 +486,12 @@ class MasterDnsVPNClient:
         self.logger.info("=" * 80)
         self.logger.info("<y>Testing MTU sizes for all resolver-domain pairs...</y>")
 
+        server_id = 0
+        total_conns = len(self.connections_map)
         for connection in self.connections_map:
             if not connection or self.should_stop.is_set():
                 continue
-
+            server_id += 1
             domain = connection.get("domain")
             resolver = connection.get("resolver")
             dns_port = 53
@@ -509,7 +511,7 @@ class MasterDnsVPNClient:
                 self.min_upload_mtu > 0 and up_mtu_bytes < self.min_upload_mtu
             ):
                 self.logger.warning(
-                    f"<red>❌ Connection invalid for <yellow>{domain}</yellow> via <yellow>{resolver}</yellow>: Upload MTU failed.</red>"
+                    f"<red>❌ Connection invalid for <yellow>{domain}</yellow> via <yellow>{resolver}</yellow>: Upload MTU failed. (<cyan>{server_id}/{total_conns}</cyan>)</red>"
                 )
                 continue
 
@@ -522,7 +524,7 @@ class MasterDnsVPNClient:
                 self.min_download_mtu > 0 and down_mtu_bytes < self.min_download_mtu
             ):
                 self.logger.warning(
-                    f"<red>❌ Connection invalid for <yellow>{domain}</yellow> via <yellow>{resolver}</yellow>: Download MTU failed.</red>"
+                    f"<red>❌ Connection invalid for <yellow>{domain}</yellow> via <yellow>{resolver}</yellow>: Download MTU failed. (<cyan>{server_id}/{total_conns}</cyan>)</red>"
                 )
                 continue
 
@@ -535,7 +537,7 @@ class MasterDnsVPNClient:
 
             self.logger.info(
                 f"<cyan>✅ Valid: {domain} via <green>{resolver}</green> | "
-                f"Upload MTU: <red>{up_mtu_bytes}</red> | Download MTU: <red>{down_mtu_bytes}</red></cyan>"
+                f"Upload MTU: <red>{up_mtu_bytes}</red> | Download MTU: <red>{down_mtu_bytes}</red> (<yellow>{server_id}/{total_conns}</yellow>)</cyan>"
             )
 
         valid_conns = [c for c in self.connections_map if c.get("is_valid")]
