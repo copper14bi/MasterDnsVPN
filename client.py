@@ -1487,7 +1487,6 @@ class MasterDnsVPNClient:
 
     async def _send_single_packet(self, item):
         self.ping_manager.active_connections = len(self.active_streams)
-
         _, _, pkt_type, stream_id, sn, data = item
 
         self.ping_manager.update_activity()
