@@ -36,8 +36,9 @@ if [[ "${EUID}" -ne 0 ]]; then
   log_error "Run this script as root (sudo)."
 fi
 
-INSTALL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$INSTALL_DIR"
+INSTALL_DIR="$(pwd)"
+log_info "Installation directory: $INSTALL_DIR"
+cd "$INSTALL_DIR" || log_error "Cannot access install directory: $INSTALL_DIR"
 
 if [[ -f "server_config.toml" && -f "server_config.toml.backup" ]]; then
   log_error "Both server_config.toml and server_config.toml.backup exist. Remove one and retry."
@@ -242,7 +243,10 @@ if [[ -f "server_config.toml" ]]; then
 fi
 
 log_info "Downloading server binaries..."
-DOWNLOAD_DIR="$(mktemp -d /tmp/masterdnsvpn_download.XXXXXX)"
+if ! DOWNLOAD_DIR="$(mktemp -d /tmp/masterdnsvpn_download.XXXXXX 2>/dev/null)"; then
+  DOWNLOAD_DIR="$(mktemp -d "$INSTALL_DIR/masterdnsvpn_download.XXXXXX" 2>/dev/null || true)"
+fi
+[[ -n "${DOWNLOAD_DIR:-}" && -d "${DOWNLOAD_DIR:-}" ]] || log_error "Failed to create temporary download directory. Check free space and /tmp permissions."
 ZIP_PATH="${DOWNLOAD_DIR}/server.zip"
 
 if ! curl -fL --retry 3 --retry-delay 2 --connect-timeout 15 -o "$ZIP_PATH" "$URL"; then
