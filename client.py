@@ -4,7 +4,9 @@
 # Year: 2026
 
 import asyncio
+import concurrent.futures
 import ctypes
+import functools
 import heapq
 import os
 import random
@@ -52,6 +54,7 @@ class MasterDnsVPNClient(PacketQueueMixin):
         self.should_stop: asyncio.Event = asyncio.Event()
         self.session_restart_event = None
         self.rx_tasks = set()
+        self.cpu_executor: Optional[concurrent.futures.ThreadPoolExecutor] = None
 
         # ---------------------------------------------------------
         # Config and logger bootstrap
@@ -69,6 +72,14 @@ class MasterDnsVPNClient(PacketQueueMixin):
             sys.exit(1)
 
         self.logger = getLogger(log_level=self.config.get("LOG_LEVEL", "INFO"))
+        auto_cpu_workers = max(2, min(16, (os.cpu_count() or 1)))
+        raw_cpu_workers = int(self.config.get("CPU_WORKER_THREADS", 0))
+        if raw_cpu_workers < 0:
+            self.cpu_worker_threads = 0
+        elif raw_cpu_workers == 0:
+            self.cpu_worker_threads = auto_cpu_workers
+        else:
+            self.cpu_worker_threads = raw_cpu_workers
 
         # ---------------------------------------------------------
         # Protocol and authentication configuration
@@ -650,7 +661,9 @@ class MasterDnsVPNClient(PacketQueueMixin):
         if not response_bytes:
             return None, b""
 
-        parsed = self.dns_parser.parse_dns_packet(response_bytes)
+        parsed = await self._run_cpu_task(
+            self.dns_parser.parse_dns_packet, response_bytes
+        )
         if not parsed or not parsed.get("questions"):
             return None, b""
 
@@ -678,9 +691,22 @@ class MasterDnsVPNClient(PacketQueueMixin):
         except Exception:
             return None, b""
 
-        return self.dns_parser.extract_vpn_response(
-            parsed, is_encoded=self.base_encode_responses
+        return await self._run_cpu_task(
+            self.dns_parser.extract_vpn_response,
+            parsed,
+            is_encoded=self.base_encode_responses,
         )
+
+    async def _run_cpu_task(self, func, *args, **kwargs):
+        """Run CPU-heavy parser/codec work on a thread pool while preserving single state owner."""
+        if not self.cpu_executor:
+            return func(*args, **kwargs)
+        loop = self.loop or asyncio.get_running_loop()
+        if kwargs:
+            return await loop.run_in_executor(
+                self.cpu_executor, functools.partial(func, *args, **kwargs)
+            )
+        return await loop.run_in_executor(self.cpu_executor, func, *args)
 
     # ---------------------------------------------------------
     # MTU Testing Logic
@@ -1973,12 +1999,16 @@ class MasterDnsVPNClient(PacketQueueMixin):
                 )
 
             self.workers = []
+            cpu_count = os.cpu_count() or 1
 
             num_rx_workers = self.config.get("NUM_RX_WORKERS", 2)
             for _ in range(num_rx_workers):
                 self.workers.append(self.loop.create_task(self._rx_worker()))
 
             num_workers = self.config.get("NUM_DNS_WORKERS", 4)
+            self.logger.info(
+                f"<cyan>Runtime CPU cores detected: {cpu_count} | RX workers: {num_rx_workers} | TX workers: {num_workers}</cyan>"
+            )
             self.logger.debug(
                 f"<magenta>[LOOP]</magenta> Starting {num_workers} TX workers."
             )
@@ -3170,6 +3200,11 @@ class MasterDnsVPNClient(PacketQueueMixin):
     async def start(self) -> None:
         try:
             self.loop = asyncio.get_running_loop()
+            if self.cpu_worker_threads > 0 and self.cpu_executor is None:
+                self.cpu_executor = concurrent.futures.ThreadPoolExecutor(
+                    max_workers=self.cpu_worker_threads,
+                    thread_name_prefix="mdns-cpu",
+                )
             self.logger.info("=" * 60)
             self.logger.success("<magenta>Starting MasterDnsVPN Client...</magenta>")
             self.logger.success(
@@ -3177,6 +3212,9 @@ class MasterDnsVPNClient(PacketQueueMixin):
             )
             self.logger.success(
                 "<fg #03fcc2>Telegram:</fg #03fcc2> <blue>@MasterDnsVPN</blue>"
+            )
+            self.logger.info(
+                f"<cyan>CPU worker threads enabled: {self.cpu_worker_threads}</cyan>"
             )
 
             self.logger.info("=" * 60)
@@ -3202,6 +3240,13 @@ class MasterDnsVPNClient(PacketQueueMixin):
             self.logger.info("MasterDnsVPN Client is stopping...")
         except Exception as e:
             self.logger.error(f"Error in MasterDnsVPN Client: {e}")
+        finally:
+            if self.cpu_executor:
+                try:
+                    self.cpu_executor.shutdown(wait=False, cancel_futures=True)
+                except Exception:
+                    pass
+                self.cpu_executor = None
 
     async def _sleep(self, seconds: float) -> None:
         """Async sleep helper."""
@@ -3270,7 +3315,9 @@ def main():
 
                 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
             except ImportError:
-                pass
+                print(
+                    "[MasterDnsVPN] uvloop is not available; using default asyncio loop."
+                )
 
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)

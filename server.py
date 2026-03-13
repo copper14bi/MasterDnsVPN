@@ -5,7 +5,9 @@
 
 
 import asyncio
+import concurrent.futures
 import ctypes
+import functools
 import heapq
 import os
 import random
@@ -18,19 +20,18 @@ from collections import deque
 from typing import Any, Optional
 
 from dns_utils import ARQ, DnsPacketParser
+from dns_utils.compression import (
+    Compression_Type,
+    compress_payload,
+    get_compression_name,
+    is_compression_type_available,
+    normalize_compression_type,
+    try_decompress_payload,
+)
 from dns_utils.config_loader import get_config_path, load_config
 from dns_utils.DNS_ENUMS import DNS_Record_Type, Packet_Type
 from dns_utils.PacketQueueMixin import PacketQueueMixin
 from dns_utils.utils import async_recvfrom, async_sendto, get_encrypt_key, getLogger
-
-from dns_utils.compression import (
-    Compression_Type,
-    is_compression_type_available,
-    normalize_compression_type,
-    get_compression_name,
-    compress_payload,
-    try_decompress_payload,
-)
 
 
 class Socks5ConnectError(Exception):
@@ -151,6 +152,15 @@ class MasterDnsVPNServer(PacketQueueMixin):
         self._dns_task = None
         self._session_cleanup_task = None
         self._background_tasks = set()
+        self.cpu_executor: Optional[concurrent.futures.ThreadPoolExecutor] = None
+        auto_cpu_workers = max(2, min(16, (os.cpu_count() or 1)))
+        raw_cpu_workers = int(self.config.get("CPU_WORKER_THREADS", 0))
+        if raw_cpu_workers < 0:
+            self.cpu_worker_threads = 0
+        elif raw_cpu_workers == 0:
+            self.cpu_worker_threads = auto_cpu_workers
+        else:
+            self.cpu_worker_threads = raw_cpu_workers
 
         # ---------------------------------------------------------
         # Packet metadata and dispatch maps
@@ -1514,7 +1524,7 @@ class MasterDnsVPNServer(PacketQueueMixin):
         if not data or not addr:
             return
 
-        parsed_packet = self.dns_parser.parse_dns_packet(data)
+        parsed_packet = await self._run_cpu_task(self.dns_parser.parse_dns_packet, data)
         if not parsed_packet or not parsed_packet.get("questions"):
             return
 
@@ -1543,8 +1553,8 @@ class MasterDnsVPNServer(PacketQueueMixin):
             )
 
             try:
-                extracted_header = self.dns_parser.extract_vpn_header_from_labels(
-                    labels
+                extracted_header = await self._run_cpu_task(
+                    self.dns_parser.extract_vpn_header_from_labels, labels
                 )
             except Exception:
                 extracted_header = None
@@ -1575,9 +1585,20 @@ class MasterDnsVPNServer(PacketQueueMixin):
             await self.send_udp_response(vpn_response, addr)
             return
 
-        response = self.dns_parser.server_fail_response(data)
+        response = await self._run_cpu_task(self.dns_parser.server_fail_response, data)
         if response:
             await self.send_udp_response(response, addr)
+
+    async def _run_cpu_task(self, func, *args, **kwargs):
+        """Run CPU-heavy pure parser/codec work off-loop without touching session state."""
+        if not self.cpu_executor:
+            return func(*args, **kwargs)
+        loop = self.loop or asyncio.get_running_loop()
+        if kwargs:
+            return await loop.run_in_executor(
+                self.cpu_executor, functools.partial(func, *args, **kwargs)
+            )
+        return await loop.run_in_executor(self.cpu_executor, func, *args)
 
     async def handle_dns_requests(self) -> None:
         """Asynchronously handle incoming DNS requests and spawn a new task for each."""
@@ -2050,7 +2071,9 @@ class MasterDnsVPNServer(PacketQueueMixin):
                             arq_obj = stream_data.get("arq_obj")
                             control_reliable = bool(
                                 arq_obj
-                                and getattr(arq_obj, "enable_control_reliability", False)
+                                and getattr(
+                                    arq_obj, "enable_control_reliability", False
+                                )
                             )
 
                             rst_sent = (
@@ -2208,6 +2231,19 @@ class MasterDnsVPNServer(PacketQueueMixin):
             self.logger.info(
                 f"<green>UDP socket bound on <blue>{host}:{port}</blue></green>"
             )
+            self.logger.info(
+                f"<cyan>Runtime CPU cores detected: {os.cpu_count() or 1} | MAX_CONCURRENT_REQUESTS: {int(self.config.get('MAX_CONCURRENT_REQUESTS', 1000))}</cyan>"
+            )
+            if self.cpu_worker_threads > 0:
+                self.cpu_executor = concurrent.futures.ThreadPoolExecutor(
+                    max_workers=self.cpu_worker_threads,
+                    thread_name_prefix="mdns-cpu",
+                )
+                self.logger.info(
+                    f"<cyan>CPU worker threads enabled: {self.cpu_worker_threads}</cyan>"
+                )
+            else:
+                self.logger.info("<yellow>CPU worker threads disabled.</yellow>")
 
             if sys.platform == "win32":
                 try:
@@ -2272,6 +2308,12 @@ class MasterDnsVPNServer(PacketQueueMixin):
                 self.udp_sock.close()
             except Exception:
                 pass
+        if self.cpu_executor:
+            try:
+                self.cpu_executor.shutdown(wait=False, cancel_futures=True)
+            except Exception:
+                pass
+            self.cpu_executor = None
 
         self.logger.info("<magenta>MasterDnsVPN Server stopped.</magenta>")
         os._exit(0)
@@ -2309,7 +2351,9 @@ def main():
 
                 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
             except ImportError:
-                pass
+                print(
+                    "[MasterDnsVPN] uvloop is not available; using default asyncio loop."
+                )
 
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)

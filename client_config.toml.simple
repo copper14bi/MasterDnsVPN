@@ -174,6 +174,10 @@ ARQ_CONTROL_MAX_RETRIES = 180
 NUM_RX_WORKERS = 2
 NUM_DNS_WORKERS = 3
 
+# CPU thread-pool size for parser/codec offload.
+# 0 = auto (recommended). Set a positive number to force size. Set -1 to disable.
+CPU_WORKER_THREADS = 0
+
 # Max in-flight RX packet processing tasks.
 RX_SEMAPHORE_LIMIT = 1000
 

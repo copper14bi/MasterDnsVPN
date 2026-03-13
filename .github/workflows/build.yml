@@ -82,7 +82,8 @@ jobs:
         run: |
           pip install --upgrade pip
           pip install pyinstaller
-          pip install -r requirements.txt || true
+          pip install -r requirements.txt
+          pip check
 
       - name: Prepare build directory (Windows)
         if: ${{ matrix.os == 'windows-latest' }}
@@ -110,7 +111,7 @@ jobs:
       - name: Build client & server (Linux-Legacy via Docker)
         if: ${{ matrix.platform == 'Linux-Legacy' }}
         run: |
-          docker run --rm -v ${{ github.workspace }}:/work -w /work python:3.11-bullseye bash -c "pip install pyinstaller && pip install -r requirements.txt || true && pyinstaller --onefile --icon=assets/masterdnsvpn.ico --name 'MasterDnsVPN_Client_${{ matrix.platform }}_${{ matrix.arch }}' client.py && pyinstaller --onefile --icon=assets/masterdnsvpn.ico --name 'MasterDnsVPN_Server_${{ matrix.platform }}_${{ matrix.arch }}' server.py && chown -R $(id -u):$(id -g) dist/ build/ *.spec || true"
+          docker run --rm -v ${{ github.workspace }}:/work -w /work python:3.11-bullseye bash -c "pip install pyinstaller && pip install -r requirements.txt && pip check && pyinstaller --onefile --icon=assets/masterdnsvpn.ico --name 'MasterDnsVPN_Client_${{ matrix.platform }}_${{ matrix.arch }}' client.py && pyinstaller --onefile --icon=assets/masterdnsvpn.ico --name 'MasterDnsVPN_Server_${{ matrix.platform }}_${{ matrix.arch }}' server.py && chown -R $(id -u):$(id -g) dist/ build/ *.spec || true"
 
       - name: Bundle config templates with executables
         shell: bash
