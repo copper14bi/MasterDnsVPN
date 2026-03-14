@@ -17,7 +17,7 @@ import sys
 import time
 from bisect import bisect_left, bisect_right, insort
 from collections import defaultdict, deque
-from typing import Optional, Tuple
+from typing import Optional
 
 from dns_utils.ARQ import ARQ
 from dns_utils.compression import (
@@ -2954,11 +2954,15 @@ class MasterDnsVPNClient(PacketQueueMixin):
 
         stream_data = self.active_streams.get(stream_id)
         if not stream_data:
-            if ptype in (
-                Packet_Type.STREAM_RST,
-                Packet_Type.STREAM_RST_ACK,
-                Packet_Type.STREAM_FIN_ACK,
-            ) or ptype in self._control_request_ack_map.values():
+            if (
+                ptype
+                in (
+                    Packet_Type.STREAM_RST,
+                    Packet_Type.STREAM_RST_ACK,
+                    Packet_Type.STREAM_FIN_ACK,
+                )
+                or ptype in self._control_request_ack_map.values()
+            ):
                 if not self._track_main_packet_once(
                     self.__dict__,
                     stream_id,
@@ -3340,9 +3344,7 @@ class MasterDnsVPNClient(PacketQueueMixin):
             return
 
         if ptype in self._control_ack_types and stream_id_exists:
-            is_socks_fragment_ack = (
-                ptype == Packet_Type.SOCKS5_SYN_ACK and bool(data)
-            )
+            is_socks_fragment_ack = ptype == Packet_Type.SOCKS5_SYN_ACK and bool(data)
             arq = stream_data.get("stream")
             if arq and not is_socks_fragment_ack:
                 await arq.receive_control_ack(ptype, sn)

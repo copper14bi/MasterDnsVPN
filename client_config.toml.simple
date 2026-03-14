@@ -176,7 +176,7 @@ MAX_CONNECTION_ATTEMPTS = 10
 
 # Data-plane ARQ settings.
 # Rediuce ARQ_WINDOW_SIZE if your RAM is limited or if you have very high MTUs and want to reduce memory usage.
-ARQ_WINDOW_SIZE = 500
+ARQ_WINDOW_SIZE = 256
 ARQ_INITIAL_RTO = 0.2
 ARQ_MAX_RTO = 1.0
 
@@ -198,7 +198,7 @@ NUM_DNS_WORKERS = 3
 CPU_WORKER_THREADS = 0
 
 # Max in-flight RX packet processing tasks.
-RX_SEMAPHORE_LIMIT = 1000
+RX_SEMAPHORE_LIMIT = 500
 
 # Max closed-stream records retained for duplicate-close protection.
 MAX_CLOSED_STREAM_RECORDS = 2000
@@ -212,5 +212,5 @@ LOG_LEVEL = "INFO"
 # ------------------------------------------------------------------------------
 # 7) Version Marker
 # ------------------------------------------------------------------------------
-CONFIG_VERSION = 3.0
+CONFIG_VERSION = 4.0
 
