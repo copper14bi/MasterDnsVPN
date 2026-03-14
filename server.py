@@ -17,7 +17,7 @@ import struct
 import sys
 import time
 from collections import deque
-from typing import Any, Optional
+from typing import Optional
 
 from dns_utils.ARQ import ARQ
 from dns_utils.compression import (
@@ -405,7 +405,9 @@ class MasterDnsVPNServer(PacketQueueMixin):
     ) -> Optional[int]:
         try:
             if not self.free_session_ids:
-                self.logger.error(f"All {self._max_sessions} session slots are full!")
+                self.logger.error(
+                    f"<yellow>All {self._max_sessions} session slots are full!</yellow>"
+                )
                 return None
 
             session_id = self.free_session_ids.popleft()
@@ -441,7 +443,7 @@ class MasterDnsVPNServer(PacketQueueMixin):
             )
             return session_id
         except Exception as e:
-            self.logger.error(f"Error creating new session: {e}")
+            self.logger.error(f"<red>Error creating new session: {e}</red>")
             return None
 
     async def _close_session(self, session_id: int) -> None:
@@ -511,6 +513,9 @@ class MasterDnsVPNServer(PacketQueueMixin):
         """Extract packet payload and apply optional decompression based on header flag."""
         payload = self.dns_parser.extract_vpn_data_from_labels(labels)
         if not payload or not extracted_header:
+            self.logger.error(
+                f"<yellow>No payload or header found in labels: '{labels}'</yellow>"
+            )
             return payload
 
         ptype = int(extracted_header.get("packet_type", -1))
@@ -525,11 +530,18 @@ class MasterDnsVPNServer(PacketQueueMixin):
             return payload
 
         if not is_compression_type_available(comp_type):
+            self.logger.error(
+                f"<yellow>Compression type {comp_type} is not available. Returning empty payload.</yellow>"
+            )
             return b""
 
         decompressed, ok = try_decompress_payload(payload, comp_type)
         if not ok:
+            self.logger.error(
+                f"<yellow>Failed to decompress payload with compression type {comp_type}. Returning empty payload, original size was {len(payload)} bytes.</yellow>"
+            )
             return b""
+
         return decompressed
 
     def _spawn_background_task(self, coro):
@@ -1603,74 +1615,142 @@ class MasterDnsVPNServer(PacketQueueMixin):
                 session_id, stream_id, reason=f"SOCKS target unreachable: {e}"
             )
 
+    async def _send_parser_response(self, builder, data, addr=None):
+        if addr is None:
+            self.logger.debug("<red>Cannot send parser response: addr is None.</red>")
+            return
+
+        response = await self._run_cpu_task(builder, data)
+        if response:
+            await self.send_udp_response(response, addr)
+
     async def handle_single_request(self, data, addr):
         """Handle a single DNS request efficiently."""
-        if not data or not addr:
-            return
+        try:
+            if not data or not addr:
+                return
 
-        parsed_packet = await self._run_cpu_task(self.dns_parser.parse_dns_packet, data)
-        if not parsed_packet or not parsed_packet.get("questions"):
-            return
+            parsed_packet = await self._run_cpu_task(
+                self.dns_parser.parse_dns_packet, data
+            )
 
-        q0 = parsed_packet["questions"][0]
-        request_domain = q0.get("qName")
-        if not request_domain:
-            return
+            if not parsed_packet or not parsed_packet.get("questions"):
+                self.logger.debug(
+                    f"Received invalid DNS request from {addr}. Ignoring."
+                )
+                await self._send_parser_response(
+                    self.dns_parser.format_error_response, data, addr
+                )
+                return
 
-        packet_domain = request_domain.lower()
+            q0 = parsed_packet["questions"][0]
+            request_domain = q0.get("qName")
+            if not request_domain:
+                self.logger.debug(
+                    f"Received DNS request with empty qName from {addr}. Ignoring."
+                )
+                await self._send_parser_response(
+                    self.dns_parser.format_error_response, data, addr
+                )
+                return
 
-        if not packet_domain.endswith(self.allowed_domains_lower):
-            return
+            packet_domain = request_domain.lower()
 
-        packet_main_domain = ""
-        for d in self.allowed_domains_lower:
-            if packet_domain.endswith(d):
-                packet_main_domain = d
-                break
+            packet_main_domain = next(
+                (d for d in self.allowed_domains_lower if packet_domain.endswith(d)),
+                "",
+            )
 
-        vpn_response = None
-        if q0.get("qType") == DNS_Record_Type.TXT and packet_domain.count(".") >= 2:
+            if not packet_main_domain:
+                self.logger.debug(
+                    f"Received DNS request for unauthorized domain '{request_domain}' from {addr}. Ignoring."
+                )
+                await self._send_parser_response(
+                    self.dns_parser.refused_response, data, addr
+                )
+                return
+
+            if q0.get("qType") != DNS_Record_Type.TXT:
+                await self._send_parser_response(
+                    self.dns_parser.empty_noerror_response, data, addr
+                )
+                return
+
+            if packet_domain.count(".") < 2:
+                self.logger.debug(
+                    f"Received DNS request with insufficient subdomain labels from {addr}. Ignoring."
+                )
+                await self._send_parser_response(
+                    self.dns_parser.empty_noerror_response, data, addr
+                )
+                return
+
             labels = (
                 packet_domain[: -len("." + packet_main_domain)]
                 if packet_main_domain
                 else packet_domain
             )
+
+            if len(labels) == 0:
+                self.logger.debug(
+                    f"Received DNS request with no labels to extract from '{request_domain}' from {addr}. Ignoring."
+                )
+                await self._send_parser_response(
+                    self.dns_parser.empty_noerror_response, data, addr
+                )
+                return
+
             try:
                 extracted_header = await self._run_cpu_task(
                     self.dns_parser.extract_vpn_header_from_labels, labels
                 )
             except Exception as e:
-                self.logger.error(f"Error extracting VPN header: {e}")
+                self.logger.error(
+                    f"Error extracting VPN header from labels '{labels}': {e}"
+                )
                 extracted_header = None
 
-            if extracted_header:
-                packet_type = extracted_header.get("packet_type")
-                session_id = extracted_header.get("session_id")
+            if not extracted_header:
+                await self._send_parser_response(
+                    self.dns_parser.empty_noerror_response, data, addr
+                )
+                return
 
-                if packet_type in self._valid_packet_types:
-                    try:
-                        vpn_response = await self.handle_vpn_packet(
-                            packet_type=packet_type,
-                            session_id=session_id,
-                            data=data,
-                            labels=labels,
-                            parsed_packet=parsed_packet,
-                            addr=addr,
-                            request_domain=request_domain,
-                            extracted_header=extracted_header,
-                        )
-                    except asyncio.CancelledError:
-                        raise
-                    except Exception as e:
-                        self.logger.error(f"Error handling VPN packet: {e}")
-                        vpn_response = None
-        if vpn_response:
-            await self.send_udp_response(vpn_response, addr)
+            packet_type = extracted_header.get("packet_type")
+            session_id = extracted_header.get("session_id")
+
+            if packet_type in self._valid_packet_types:
+                try:
+                    vpn_response = await self.handle_vpn_packet(
+                        packet_type=packet_type,
+                        session_id=session_id,
+                        data=data,
+                        labels=labels,
+                        parsed_packet=parsed_packet,
+                        addr=addr,
+                        request_domain=request_domain,
+                        extracted_header=extracted_header,
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    self.logger.debug(
+                        f"Error handling VPN packet for session_id '{session_id}' from {addr}: {e}"
+                    )
+                    vpn_response = None
+
+            if vpn_response:
+                await self.send_udp_response(vpn_response, addr)
+                return
+
+            await self._send_parser_response(
+                self.dns_parser.empty_noerror_response, data, addr
+            )
+        except Exception as error:
+            self.logger.debug(
+                f"Unexpected error in handle_single_request from {addr}: {error}"
+            )
             return
-
-        response = await self._run_cpu_task(self.dns_parser.server_fail_response, data)
-        if response:
-            await self.send_udp_response(response, addr)
 
     async def _run_cpu_task(self, func, *args, **kwargs):
         """Run CPU-heavy pure parser/codec work off-loop without touching session state."""

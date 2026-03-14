@@ -10,7 +10,7 @@ import random
 import struct
 from typing import Any, Optional
 
-from .DNS_ENUMS import DNS_QClass, DNS_Record_Type, Packet_Type
+from .DNS_ENUMS import DNS_QClass, DNS_Record_Type, Packet_Type, DNS_rCode
 
 
 class DnsPacketParser:
@@ -426,6 +426,63 @@ class DnsPacketParser:
         except Exception as e:
             self.logger.error(f"Failed to create Server Failure response: {e}")
             return b""
+
+    def _basic_response_with_rcode(self, request_data: bytes, rcode: int) -> bytes:
+        """
+        Build a DNS response carrying the original question with no answers and the given RCODE.
+        Mirrors EDNS0 presence when available.
+        """
+        try:
+            if len(request_data) < 12:
+                return b""
+
+            pkt_id = (request_data[0] << 8) | request_data[1]
+            flags = ((request_data[2] << 8) | request_data[3]) | 0x8000
+            flags = (flags & 0xFFF0) | (rcode & 0xF)
+            qd_count = (request_data[4] << 8) | request_data[5]
+            ar_count = (request_data[10] << 8) | request_data[11]
+
+            offset = 12
+            for _ in range(qd_count):
+                _, offset = self._parse_dns_name_from_bytes(request_data, offset)
+                offset += 4  # Skip Type and Class
+
+            res_ar_count = 0
+            edns0_bytes = b""
+            if ar_count > 0:
+                edns0_bytes = b"\x00\x00\x29\x10\x00\x00\x00\x00\x00\x00\x00"
+                res_ar_count = 1
+
+            header = self._HEADER_PACKER.pack(
+                pkt_id, flags, qd_count, 0, 0, res_ar_count
+            )
+
+            parts = [header, request_data[12:offset]]
+            if edns0_bytes:
+                parts.append(edns0_bytes)
+
+            return b"".join(parts)
+        except Exception as _:
+            return b""
+
+    def empty_noerror_response(self, request_data: bytes) -> bytes:
+        """
+        Create an empty DNS success response (NOERROR/NODATA) based on the request.
+        Preserves the original question and mirrors EDNS0 presence when available.
+        """
+        return self._basic_response_with_rcode(request_data, DNS_rCode.NO_ERROR)
+
+    def format_error_response(self, request_data: bytes) -> bytes:
+        """
+        Create a DNS Format Error response (RCODE=1).
+        """
+        return self._basic_response_with_rcode(request_data, DNS_rCode.FORMAT_ERROR)
+
+    def refused_response(self, request_data: bytes) -> bytes:
+        """
+        Create a DNS Refused response (RCODE=5).
+        """
+        return self._basic_response_with_rcode(request_data, DNS_rCode.REFUSED)
 
     def simple_answer_packet(self, answers: list, question_packet: bytes) -> bytes:
         """
@@ -1358,11 +1415,19 @@ class DnsPacketParser:
             return b""
 
         data_encoded = left.replace(".", "")
-
         try:
-            return self.decode_and_decrypt_data(data_encoded, lowerCaseOnly=True)
+            decoded_data = self.decode_and_decrypt_data(
+                data_encoded, lowerCaseOnly=True
+            )
+
+            if not decoded_data:
+                return b""
+
+            return decoded_data
         except Exception as e:
-            self.logger.error(f"Failed to extract VPN data: {e}")
+            self.logger.error(
+                f"<red>Failed to extract VPN data: {e}, labels: {labels}</red>"
+            )
             return b""
 
     def parse_vpn_header_bytes(
