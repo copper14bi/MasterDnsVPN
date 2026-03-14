@@ -208,7 +208,6 @@ class MasterDnsVPNServer(PacketQueueMixin):
             Packet_Type.SESSION_INIT,
             Packet_Type.MTU_UP_REQ,
             Packet_Type.MTU_DOWN_REQ,
-            Packet_Type.SET_MTU_REQ,
         }
         self._block_packer = DnsPacketParser.PACKED_CONTROL_BLOCK_STRUCT
         self._stream_packet_handlers = {
@@ -431,9 +430,7 @@ class MasterDnsVPNServer(PacketQueueMixin):
 
             self.sessions[session_id] = {
                 "session_id": session_id,
-                "session_cookie": random.randint(
-                    0, 255
-                ),  # TODO: IMPLEMENT PROPER SESSION COOKIE GENERATION
+                "session_cookie": random.randint(1, 255),
                 "created_at": now,
                 "last_packet_time": now,
                 "init_token": client_token,
@@ -481,6 +478,7 @@ class MasterDnsVPNServer(PacketQueueMixin):
         self.recently_closed_sessions[session_id] = {
             "time": time.monotonic(),
             "base_encode": base_flag,
+            "session_cookie": int(session.get("session_cookie", 0) or 0),
         }
 
         stream_ids = list(session.get("streams", {}).keys())
@@ -532,6 +530,21 @@ class MasterDnsVPNServer(PacketQueueMixin):
                 session["last_packet_time"] = time.monotonic()
         except Exception:
             pass
+
+    def _expected_session_cookie(self, packet_type: int, session_id: int) -> int | None:
+        ptype = int(packet_type)
+        if ptype in self._pre_session_packet_types:
+            return 0
+
+        session = self.sessions.get(session_id)
+        if session is not None:
+            return int(session.get("session_cookie", 0) or 0)
+
+        closed_info = self.recently_closed_sessions.get(session_id)
+        if closed_info is not None:
+            return int(closed_info.get("session_cookie", 0) or 0)
+
+        return None
 
     def _activate_response_queue(self, session: dict, stream_id: int) -> None:
         sid = int(stream_id)
@@ -691,6 +704,9 @@ class MasterDnsVPNServer(PacketQueueMixin):
                 + str(new_session_id).encode("ascii", errors="ignore")
                 + b":"
                 + compression_pref_byte
+                + bytes(
+                    [int(self.sessions[new_session_id].get("session_cookie", 0) or 0)]
+                )
             )
 
             return self.dns_parser.generate_vpn_response_packet(
@@ -700,6 +716,7 @@ class MasterDnsVPNServer(PacketQueueMixin):
                 data=response_bytes,
                 question_packet=data,
                 encode_data=base_encode,
+                session_cookie=0,
             )
         except Exception as e:
             self.logger.error(
@@ -1549,14 +1566,6 @@ class MasterDnsVPNServer(PacketQueueMixin):
                 data=data,
                 extracted_header=extracted_header,
             )
-        if packet_type == Packet_Type.SET_MTU_REQ:
-            return await self._handle_set_mtu(
-                request_domain=request_domain,
-                session_id=session_id,
-                labels=labels,
-                data=data,
-                extracted_header=extracted_header,
-            )
         return None
 
     async def _process_session_packet(
@@ -1780,6 +1789,7 @@ class MasterDnsVPNServer(PacketQueueMixin):
                 data=invalid_response_data,
                 question_packet=question_packet,
                 encode_data=is_base,
+                session_cookie=0,
             )
         except Exception as e:
             self.logger.debug(
@@ -1826,6 +1836,16 @@ class MasterDnsVPNServer(PacketQueueMixin):
                 request_domain=request_domain,
                 question_packet=data,
                 closed_info=closed_info,
+            )
+
+        if packet_type == Packet_Type.SET_MTU_REQ:
+            return await self._handle_set_mtu(
+                request_domain=request_domain,
+                session_id=session_id,
+                labels=labels,
+                data=data,
+                extracted_header=extracted_header,
+                addr=addr,
             )
 
         now_mono = time.monotonic()
@@ -1877,6 +1897,7 @@ class MasterDnsVPNServer(PacketQueueMixin):
             sequence_num=res_sn,
             encode_data=base_encode,
             compression_type=response_compression_type,
+            session_cookie=int(session.get("session_cookie", 0) or 0),
         )
 
     async def _process_socks5_target(
@@ -2189,8 +2210,15 @@ class MasterDnsVPNServer(PacketQueueMixin):
                 )
                 return
 
-            packet_type = extracted_header.get("packet_type")
-            session_id = extracted_header.get("session_id")
+            packet_type = int(extracted_header.get("packet_type", -1))
+            session_id = int(extracted_header.get("session_id", -1))
+            packet_cookie = int(extracted_header.get("session_cookie", 0) or 0)
+            expected_cookie = self._expected_session_cookie(packet_type, session_id)
+            if expected_cookie is None or packet_cookie != expected_cookie:
+                self.logger.debug(
+                    f"Invalid session cookie for packet type '{packet_type}' session '{session_id}' from {addr}. Dropping."
+                )
+                return
 
             if packet_type in self._valid_packet_types:
                 try:
@@ -2336,6 +2364,7 @@ class MasterDnsVPNServer(PacketQueueMixin):
                 data=sync_token,
                 question_packet=data,
                 encode_data=base_encode,
+                session_cookie=int(session.get("session_cookie", 0) or 0),
             )
         except Exception as e:
             self.logger.debug(f"Error handling SET_MTU_REQ from {addr}: {e}")
@@ -2384,6 +2413,7 @@ class MasterDnsVPNServer(PacketQueueMixin):
                 data=raw_plaintext,
                 question_packet=data,
                 encode_data=base_encode,
+                session_cookie=0,
             )
         except Exception as e:
             self.logger.debug(f"Error handling MTU_DOWN_REQ from {addr}: {e}")
@@ -2411,6 +2441,7 @@ class MasterDnsVPNServer(PacketQueueMixin):
                 data=b"1",
                 question_packet=data,
                 encode_data=base_encode,
+                session_cookie=0,
             )
         except Exception as e:
             self.logger.debug(f"Error handling MTU_UP_REQ from {addr}: {e}")

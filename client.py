@@ -248,6 +248,7 @@ class MasterDnsVPNClient(PacketQueueMixin):
         self.max_packed_blocks: int = 1
         self.connections_map: list = []
         self.session_id = 0
+        self.session_cookie = 0
         self.synced_upload_mtu = 0
         self.synced_upload_mtu_chars = 0
         self.synced_download_mtu = 0
@@ -883,11 +884,22 @@ class MasterDnsVPNClient(PacketQueueMixin):
         except Exception:
             return None, b""
 
-        return await self._run_cpu_task(
+        parsed_header, returned_data = await self._run_cpu_task(
             self.dns_parser.extract_vpn_response,
             parsed,
             is_encoded=self.base_encode_responses,
         )
+        if not parsed_header:
+            return None, b""
+
+        packet_cookie = int(parsed_header.get("session_cookie", 0) or 0)
+        expected_cookie = self._expected_inbound_session_cookie(
+            int(parsed_header.get("packet_type", -1))
+        )
+        if packet_cookie != expected_cookie:
+            return None, b""
+
+        return parsed_header, returned_data
 
     async def _run_cpu_task(self, func, *args, **kwargs):
         """Run CPU-heavy parser/codec work on a thread pool while preserving single state owner."""
@@ -1078,9 +1090,14 @@ class MasterDnsVPNClient(PacketQueueMixin):
                 f"<magenta>[MTU Probe]</magenta> Testing Download MTU: <yellow>{mtu_size}</yellow> bytes via <cyan>{dns_server}</cyan>"
             )
 
+        worst_header = self.dns_parser.get_max_vpn_header_raw_size()
+        test_header = self.dns_parser.get_vpn_header_raw_size(Packet_Type.MTU_DOWN_RES)
+        header_reserve = max(0, worst_header - test_header)
+        effective_download_size = mtu_size + header_reserve
+
         target_length = max(5, up_mtu_bytes)
         flag_byte = b"\x01" if self.base_encode_responses else b"\x00"
-        data_bytes = flag_byte + mtu_size.to_bytes(4, "big")
+        data_bytes = flag_byte + effective_download_size.to_bytes(4, "big")
 
         if target_length > 5:
             data_bytes += os.urandom(target_length - 5)
@@ -1120,7 +1137,7 @@ class MasterDnsVPNClient(PacketQueueMixin):
         packet_type = parsed_header["packet_type"] if parsed_header else None
 
         if packet_type == Packet_Type.MTU_DOWN_RES:
-            if returned_data and len(returned_data) == mtu_size:
+            if returned_data and len(returned_data) == effective_download_size:
                 self._log_mtu_probe(
                     f"<yellow>🟢 Download test passed: Download MTU <green>{mtu_size}</green> bytes via <cyan>{dns_server}</cyan> for <cyan>{domain}</cyan></yellow>",
                     level="success",
@@ -1392,7 +1409,12 @@ class MasterDnsVPNClient(PacketQueueMixin):
                     )  # Base64 inflation (4 chars per 3 bytes)
                 else:
                     raw_cap = available
-                return max(0, raw_cap - self.crypto_overhead - 8)  # 8 for VPN header
+                return max(
+                    0,
+                    raw_cap
+                    - self.crypto_overhead
+                    - self.dns_parser.get_max_vpn_header_raw_size(),
+                )
 
             down_512 = calc_down_capacity(512)
             min_down_512 = max(0, down_512 - 10)
@@ -1902,6 +1924,7 @@ class MasterDnsVPNClient(PacketQueueMixin):
                 mtu_chars=self.synced_upload_mtu_chars,
                 encode_data=True,
                 qType=DNS_Record_Type.TXT,
+                session_cookie=self.session_cookie,
             )
 
             if not dns_queries:
@@ -2028,10 +2051,13 @@ class MasterDnsVPNClient(PacketQueueMixin):
                             received_token = parts[0].decode("ascii", errors="ignore")
                             raw_sid = bytes(parts[1] or b"")
                             compression_pref = 0
+                            session_cookie = 0
                             if len(parts) >= 3:
                                 raw_comp = bytes(parts[2] or b"")
-                                if len(raw_comp) == 1:
+                                if len(raw_comp) >= 1:
                                     compression_pref = raw_comp[0]
+                                    if len(raw_comp) >= 2:
+                                        session_cookie = raw_comp[1]
                                 else:
                                     comp_txt = (
                                         raw_comp.decode("ascii", errors="ignore")
@@ -2094,6 +2120,7 @@ class MasterDnsVPNClient(PacketQueueMixin):
                                 raise ValueError(
                                     f"Invalid session id payload: {raw_sid!r}"
                                 )
+                            self.session_cookie = int(session_cookie) & 0xFF
                             self.logger.success(
                                 f"<green>Validated Session ID: <cyan>{self.session_id}</cyan>, Upload Compression: <cyan>{get_compression_name(self.upload_compression_type)}</cyan>, Download Compression: <cyan>{get_compression_name(self.download_compression_type)}</cyan></green>"
                             )
@@ -2226,7 +2253,7 @@ class MasterDnsVPNClient(PacketQueueMixin):
     # ---------------------------------------------------------
     # TCP Multiplexing Logic & Handlers
     # ---------------------------------------------------------
-    def _reset_tunnel_runtime_state(self) -> None:
+    def _reset_tunnel_runtime_state(self, reset_session_cookie: bool = True) -> None:
         """
         Reset reconnect-sensitive runtime state.
         IMPORTANT: MTU discovery fields are intentionally preserved.
@@ -2235,6 +2262,8 @@ class MasterDnsVPNClient(PacketQueueMixin):
         self.enqueue_seq = 0
         self.round_robin_stream_id = -1
         self.last_stream_id = 0
+        if reset_session_cookie:
+            self.session_cookie = 0
 
         self.main_queue = []
         self.active_response_ids = []
@@ -2297,7 +2326,7 @@ class MasterDnsVPNClient(PacketQueueMixin):
     async def _main_tunnel_loop(self):
         """Start local TCP server and main worker tasks."""
         self.logger.info("<blue>Entering VPN Tunnel Main Loop...</blue>")
-        self._reset_tunnel_runtime_state()
+        self._reset_tunnel_runtime_state(reset_session_cookie=False)
         self.tunnel_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
             buffer_size = int(self.config.get("SOCKET_BUFFER_SIZE", 8388608))
@@ -2562,6 +2591,16 @@ class MasterDnsVPNClient(PacketQueueMixin):
     def _build_socks5_fail_reply(self, packet_type: int) -> bytes:
         rep = self._packet_type_to_socks5_rep(packet_type)
         return bytes([0x05, rep, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+
+    def _expected_inbound_session_cookie(self, packet_type: int) -> int:
+        if int(packet_type) in (
+            Packet_Type.SESSION_ACCEPT,
+            Packet_Type.MTU_UP_RES,
+            Packet_Type.MTU_DOWN_RES,
+            Packet_Type.ERROR_DROP,
+        ):
+            return 0
+        return int(self.session_cookie or 0)
 
     def _create_client_arq_stream(
         self,
@@ -3186,6 +3225,7 @@ class MasterDnsVPNClient(PacketQueueMixin):
                     stream_id=stream_id,
                     sequence_num=sn,
                     compression_type=actual_comp_type,
+                    session_cookie=self.session_cookie,
                 )
 
                 if not query_packets:
