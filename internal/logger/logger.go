@@ -63,7 +63,9 @@ func (l *Logger) logf(level int, levelName string, format string, args ...any) {
 	levelText := "[" + levelName + "]"
 
 	if l.color {
-		msg = renderColorTags(msg)
+		if strings.IndexByte(msg, '<') >= 0 {
+			msg = renderColorTags(msg)
+		}
 		appName = "\x1b[36m" + appName + "\x1b[0m"
 		levelText = colorizeLevel(level, levelText)
 	}

@@ -184,12 +184,12 @@ func (s *Server) worker(ctx context.Context, conn *net.UDPConn, reqCh <-chan req
 }
 
 func (s *Server) handlePacket(packet []byte) []byte {
+	if !dnsparser.LooksLikeDNSRequest(packet) {
+		return nil
+	}
+
 	parsed, err := dnsparser.ParsePacketLite(packet)
 	if err != nil {
-		if !dnsparser.LooksLikeDNSRequest(packet) {
-			return nil
-		}
-
 		response, responseErr := dnsparser.BuildFormatErrorResponse(packet)
 		if responseErr == nil {
 			s.log.Debugf(
