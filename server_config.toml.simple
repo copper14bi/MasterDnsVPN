@@ -130,7 +130,7 @@ CPU_WORKER_THREADS = 0
 # Max packed control blocks per response cycle (user upper bound).
 # Runtime value = min(MAX_PACKETS_PER_BATCH, MTU-based download limit).
 # Download MTU limit uses 80% of negotiated download MTU: floor((MTU*0.80)/5).
-MAX_PACKETS_PER_BATCH = 1000
+MAX_PACKETS_PER_BATCH = 20
 
 # UDP socket buffer bytes.
 SOCKET_BUFFER_SIZE = 8388608

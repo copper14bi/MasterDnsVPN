@@ -238,6 +238,15 @@ class MasterDnsVPNClient(PacketQueueMixin):
             self.config.get("MAX_PACKETS_PER_BATCH", 100)
         )
         self.packet_duplication_count = self.config.get("PACKET_DUPLICATION_COUNT", 1)
+        self.setup_packet_duplication_count = max(
+            int(
+                self.config.get(
+                    "SETUP_PACKET_DUPLICATION_COUNT",
+                    max(2, int(self.packet_duplication_count)),
+                )
+            ),
+            int(self.packet_duplication_count),
+        )
         self.stream_resolver_failover_resend_threshold: int = max(
             1,
             int(self.config.get("STREAM_RESOLVER_FAILOVER_RESEND_THRESHOLD", 2)),
@@ -732,13 +741,16 @@ class MasterDnsVPNClient(PacketQueueMixin):
     def _select_target_connections_for_packet(
         self, pkt_type: int, stream_id: int
     ) -> list[dict]:
+        ptype = int(pkt_type)
         target_count = max(1, int(self.packet_duplication_count))
+        if ptype in (Packet_Type.STREAM_SYN, Packet_Type.SOCKS5_SYN):
+            target_count = max(target_count, int(self.setup_packet_duplication_count))
         if stream_id <= 0 or self.balancer.valid_servers_count <= 0:
             return self.balancer.get_unique_servers(target_count)
 
         # Keep control/setup packets on the normal balancer path so SYN/SOCKS
         # handshakes and terminal control traffic can escape a slow preferred resolver.
-        if int(pkt_type) not in (Packet_Type.STREAM_DATA, Packet_Type.STREAM_RESEND):
+        if ptype not in (Packet_Type.STREAM_DATA, Packet_Type.STREAM_RESEND):
             return self.balancer.get_unique_servers(target_count)
 
         stream_data = self.active_streams.get(stream_id)
@@ -3793,6 +3805,7 @@ class MasterDnsVPNClient(PacketQueueMixin):
             "preferred_server_key": "",
             "resolver_resend_streak": 0,
             "last_resolver_failover_at": 0.0,
+            "handshake_last_progress": now_mono,
         }
 
         self._ensure_stream_preferred_connection(self.active_streams[stream_id])
@@ -3807,10 +3820,34 @@ class MasterDnsVPNClient(PacketQueueMixin):
             await self._stream_syn_handler(stream_id, target_payload, reader, writer)
 
             try:
-                await asyncio.wait_for(
-                    self.active_streams[stream_id]["handshake_event"].wait(),
-                    timeout=self.socks_handshake_timeout,
-                )
+                handshake_event = self.active_streams[stream_id]["handshake_event"]
+                while True:
+                    stream_state = self.active_streams.get(stream_id)
+                    if not stream_state:
+                        raise ConnectionError(
+                            "Stream closed before handshake completion."
+                        )
+
+                    last_progress = float(
+                        stream_state.get("handshake_last_progress", 0.0) or 0.0
+                    )
+                    now_mono = time.monotonic()
+                    remaining = (
+                        last_progress + self.socks_handshake_timeout
+                    ) - now_mono
+                    if remaining <= 0:
+                        raise asyncio.TimeoutError
+
+                    try:
+                        await asyncio.wait_for(
+                            handshake_event.wait(),
+                            timeout=min(1.0, max(0.1, remaining)),
+                        )
+                        break
+                    except asyncio.TimeoutError:
+                        if handshake_event.is_set():
+                            break
+                        continue
 
                 stream_data = self.active_streams.get(stream_id)
                 if not stream_data:
@@ -3881,18 +3918,49 @@ class MasterDnsVPNClient(PacketQueueMixin):
             except Exception as e:
                 stream_data = self.active_streams.get(stream_id, {})
                 socks_err_ptype = stream_data.get("socks_error_packet")
-                self.logger.debug(f"SOCKS Target Rejected by Server: {e}")
-                try:
-                    fail_reply = self._build_socks5_fail_reply(
-                        socks_err_ptype or Packet_Type.SOCKS5_CONNECT_FAIL
+                close_reason = str(stream_data.get("close_reason", "") or "").strip()
+                local_closed = bool((writer and writer.is_closing()) or reader.at_eof())
+                if socks_err_ptype is not None:
+                    self.logger.debug(f"SOCKS Target Rejected by Server: {e}")
+                elif local_closed:
+                    self.logger.debug(
+                        f"SOCKS handshake aborted because local app closed the connection for stream {stream_id}."
                     )
-                    writer.write(fail_reply)
-                    await writer.drain()
+                elif close_reason:
+                    self.logger.debug(
+                        f"SOCKS handshake aborted before completion for stream {stream_id}: {close_reason}"
+                    )
+                else:
+                    self.logger.debug(
+                        f"SOCKS handshake aborted before completion for stream {stream_id}: {e}"
+                    )
+                try:
+                    if (
+                        socks_err_ptype is not None
+                        and writer
+                        and not writer.is_closing()
+                    ):
+                        fail_reply = self._build_socks5_fail_reply(
+                            socks_err_ptype or Packet_Type.SOCKS5_CONNECT_FAIL
+                        )
+                        writer.write(fail_reply)
+                        await writer.drain()
                 except Exception:
                     pass
                 await self.close_stream(
                     stream_id,
-                    reason="SOCKS Target Rejected by Server",
+                    reason=(
+                        "SOCKS Target Rejected by Server"
+                        if socks_err_ptype is not None
+                        else (
+                            close_reason
+                            or (
+                                "Local app closed during SOCKS handshake"
+                                if local_closed
+                                else "SOCKS handshake aborted before completion"
+                            )
+                        )
+                    ),
                     abortive=True,
                 )
 
@@ -4398,6 +4466,7 @@ class MasterDnsVPNClient(PacketQueueMixin):
             await self._enqueue_packet(0, stream_id, sn, ack_ptype, b"")
             if self._is_socks5_error_packet(ptype) and stream_id_exists:
                 stream_data["socks_error_packet"] = ptype
+                stream_data["handshake_last_progress"] = time.monotonic()
                 if "handshake_event" in stream_data:
                     stream_data["handshake_event"].set()
             self._send_ping_packet()
@@ -4408,6 +4477,8 @@ class MasterDnsVPNClient(PacketQueueMixin):
             arq = stream_data.get("stream")
             if arq and not is_socks_fragment_ack:
                 await arq.receive_control_ack(ptype, sn)
+            if ptype == Packet_Type.SOCKS5_SYN_ACK:
+                stream_data["handshake_last_progress"] = time.monotonic()
             if (
                 ptype == Packet_Type.SOCKS5_SYN_ACK
                 and not is_socks_fragment_ack
@@ -4559,6 +4630,7 @@ class MasterDnsVPNClient(PacketQueueMixin):
 
         # Phase 2: final cleanup
         stream_data["status"] = "CLOSING"
+        stream_data["close_reason"] = str(reason or "Unknown")
         self.closed_streams[stream_id] = time.monotonic()
 
         if len(self.closed_streams) > self.max_closed_stream_records:

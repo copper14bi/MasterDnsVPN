@@ -47,6 +47,10 @@ class ARQ:
         Packet_Type.SOCKS5_AUTH_FAILED: Packet_Type.SOCKS5_AUTH_FAILED_ACK,
         Packet_Type.SOCKS5_UPSTREAM_UNAVAILABLE: Packet_Type.SOCKS5_UPSTREAM_UNAVAILABLE_ACK,
     }
+    _SETUP_CONTROL_PACKET_TYPES = {
+        Packet_Type.STREAM_SYN,
+        Packet_Type.SOCKS5_SYN,
+    }
 
     class _DummyLogger:  # pragma: no cover
         def debug(self, *args, **kwargs):
@@ -211,6 +215,35 @@ class ARQ:
     # Check whether stream is in reset path.
     def is_reset(self) -> bool:
         return self.state == Stream_State.RESET or self._rst_received or self._rst_sent
+
+    def _is_local_transport_closed_error(self, exc: Exception) -> bool:
+        if isinstance(exc, (BrokenPipeError, ConnectionResetError)):
+            return True
+
+        try:
+            if (
+                self.writer
+                and hasattr(self.writer, "is_closing")
+                and self.writer.is_closing()
+            ):
+                return True
+        except Exception:
+            pass
+
+        msg = str(exc or "").lower()
+        return any(
+            token in msg
+            for token in (
+                "handler is closed",
+                "transport closed",
+                "transport is closed",
+                "closed=true",
+                "unable to perform operation on <tcptransport",
+                "cannot call write() after write_eof()",
+                "connection lost",
+                "broken pipe",
+            )
+        )
 
     # Return True when local app side can continue reading.
     def is_open_for_local_read(self) -> bool:
@@ -511,7 +544,10 @@ class ARQ:
                 self.writer.write(b"".join(data_to_write))
                 await self.writer.drain()
         except Exception as e:
-            await self.abort(reason=f"Writer Error: {e}")
+            if self._is_local_transport_closed_error(e):
+                await self.abort(reason="Local App Closed Connection (writer closed)")
+            else:
+                await self.abort(reason=f"Writer Error: {e}")
             return
 
     # Periodic scheduler that triggers data/control retransmission checks.
@@ -646,14 +682,18 @@ class ARQ:
             return
 
         now = time.monotonic()
+        control_packet_type = int(packet_type)
+        initial_rto = self.control_rto
+        if control_packet_type in self._SETUP_CONTROL_PACKET_TYPES:
+            initial_rto = min(initial_rto, 0.35)
         self.control_snd_buf[key] = _PendingControlPacket(
-            packet_type=int(packet_type),
+            packet_type=control_packet_type,
             sequence_num=self._norm_sn(sequence_num),
             ack_type=int(ack_type),
             payload=payload or b"",
             priority=int(priority),
             retries=0,
-            current_rto=self.control_rto,
+            current_rto=initial_rto,
             time=now,
             create_time=now,
         )
@@ -735,10 +775,12 @@ class ARQ:
             return
 
         for key, info in list(self.control_snd_buf.items()):
-            if (
-                info.create_time + self.control_packet_ttl <= now
-                or info.retries >= self.control_max_retries
-            ):
+            max_retries = self.control_max_retries
+            packet_ttl = self.control_packet_ttl
+            if info.packet_type in self._SETUP_CONTROL_PACKET_TYPES:
+                max_retries = max(max_retries, 120)
+                packet_ttl = max(packet_ttl, 300.0)
+            if info.create_time + packet_ttl <= now or info.retries >= max_retries:
                 self.control_snd_buf.pop(key, None)
                 continue
 
@@ -760,8 +802,13 @@ class ARQ:
             info.time = now
             info.retries += 1
             # Aggressive backoff but always capped by user max.
+            growth = 1.2
+            floor_rto = self.control_rto
+            if info.packet_type in self._SETUP_CONTROL_PACKET_TYPES:
+                growth = 1.1
+                floor_rto = min(self.control_rto, 0.35)
             info.current_rto = min(
-                self.control_max_rto, max(self.control_rto, info.current_rto * 1.2)
+                self.control_max_rto, max(floor_rto, info.current_rto * growth)
             )
 
     # ---------------------------------------------------------------------

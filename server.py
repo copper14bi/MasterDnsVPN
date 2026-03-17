@@ -234,6 +234,7 @@ class MasterDnsVPNServer(PacketQueueMixin):
             self.cpu_worker_threads = detected_cpu_workers
         else:
             self.cpu_worker_threads = raw_cpu_workers
+        self._debug_log_limiter = {}
 
         # ---------------------------------------------------------
         # Packet metadata and dispatch maps
@@ -1015,6 +1016,38 @@ class MasterDnsVPNServer(PacketQueueMixin):
 
         task.add_done_callback(_on_done)
         return task
+
+    def _debug_log_limited(self, key, message: str, interval: float = 1.0) -> None:
+        now = time.monotonic()
+        limiter = self._debug_log_limiter
+        last_entry = limiter.get(key)
+        if last_entry is None:
+            limiter[key] = [now, 0]
+            self.logger.debug(message)
+            return
+
+        last_time, suppressed = last_entry
+        if (now - float(last_time)) >= interval:
+            limiter[key] = [now, 0]
+            if suppressed:
+                self.logger.debug(
+                    f"{message} <yellow>(+{suppressed} similar suppressed)</yellow>"
+                )
+            else:
+                self.logger.debug(message)
+
+            if len(limiter) > 4096:
+                cutoff = now - max(interval * 4.0, 5.0)
+                stale_keys = [
+                    stale_key
+                    for stale_key, stale_entry in list(limiter.items())
+                    if float(stale_entry[0]) < cutoff
+                ]
+                for stale_key in stale_keys:
+                    limiter.pop(stale_key, None)
+            return
+
+        last_entry[1] = int(suppressed) + 1
 
     async def _handle_session_init(
         self,
@@ -2474,8 +2507,16 @@ class MasterDnsVPNServer(PacketQueueMixin):
 
             async def _connect_and_handshake():
                 if use_external_socks5:
-                    logger.debug(
-                        f"<green>Forwarding to External SOCKS5 <blue>{forward_ip}:{forward_port}</blue> for target <cyan>{target_ip}:{target_port}</cyan> (Stream {stream_id})</green>"
+                    self._debug_log_limited(
+                        (
+                            "ext_socks_connect",
+                            str(forward_ip),
+                            int(forward_port),
+                            str(target_ip),
+                            int(target_port),
+                        ),
+                        f"<green>Forwarding to External SOCKS5 <blue>{forward_ip}:{forward_port}</blue> for target <cyan>{target_ip}:{target_port}</cyan> (Stream {stream_id})</green>",
+                        interval=1.5,
                     )
                     c_reader, c_writer = await asyncio.open_connection(
                         forward_ip, forward_port
@@ -2534,8 +2575,10 @@ class MasterDnsVPNServer(PacketQueueMixin):
 
                     return c_reader, c_writer
                 else:
-                    logger.debug(
-                        f"<green>SOCKS5 Fast-Connecting directly to <blue>{target_ip}:{target_port}</blue> for stream <cyan>{stream_id}</cyan></green>"
+                    self._debug_log_limited(
+                        ("direct_connect", str(target_ip), int(target_port)),
+                        f"<green>SOCKS5 Fast-Connecting directly to <blue>{target_ip}:{target_port}</blue> for stream <cyan>{stream_id}</cyan></green>",
+                        interval=1.5,
                     )
                     return await asyncio.open_connection(target_ip, target_port)
 
@@ -2625,6 +2668,9 @@ class MasterDnsVPNServer(PacketQueueMixin):
 
         except Exception as e:
             err_packet = self._map_socks5_exception_to_packet(e)
+            err_packet_name = self._packet_type_names.get(
+                int(err_packet), str(err_packet)
+            )
             await self._send_socks5_error_packet(
                 session_id,
                 stream_id,
@@ -2634,12 +2680,13 @@ class MasterDnsVPNServer(PacketQueueMixin):
             )
 
             self.logger.debug(
-                f"<red>SOCKS5 target connection failed for stream {stream_id}: {e}</red>"
+                f"<red>SOCKS5 target connection failed for stream <cyan>{stream_id}</cyan> "
+                f"as <yellow>{err_packet_name}</yellow>: {e!r}</red>"
             )
             await self.close_stream(
                 session_id,
                 stream_id,
-                reason=f"SOCKS target unreachable: {e}",
+                reason=f"SOCKS target unreachable ({err_packet_name}): {e!r}",
                 abortive=True,
             )
         finally:
@@ -2752,8 +2799,16 @@ class MasterDnsVPNServer(PacketQueueMixin):
             packet_cookie = int(extracted_header.get("session_cookie", 0) or 0)
             expected_cookie = self._expected_session_cookie(packet_type, session_id)
             if expected_cookie is None or packet_cookie != expected_cookie:
-                self.logger.debug(
-                    f"Invalid session cookie for packet type '{packet_type}' session '{session_id}' from {addr}. Dropping."
+                self._debug_log_limited(
+                    (
+                        "invalid_cookie",
+                        int(packet_type),
+                        int(session_id),
+                        int(expected_cookie) if expected_cookie is not None else -1,
+                        int(packet_cookie),
+                    ),
+                    f"Invalid session cookie for packet type '{packet_type}' session '{session_id}' from {addr}. Dropping.",
+                    interval=1.0,
                 )
                 if self._should_emit_invalid_cookie_error(
                     packet_type,
@@ -3068,6 +3123,7 @@ class MasterDnsVPNServer(PacketQueueMixin):
 
         # Phase 2: final cleanup
         stream_data["status"] = "CLOSING"
+        stream_data["close_reason"] = str(reason or "Unknown")
         session.setdefault("closed_streams", {})[stream_id] = time.monotonic()
 
         if len(session["closed_streams"]) > 1000:
@@ -3090,7 +3146,18 @@ class MasterDnsVPNServer(PacketQueueMixin):
             except Exception as e:
                 self.logger.debug(f"Error closing ARQStream {stream_id}: {e}")
         else:
-            if abortive and not remote_reset:
+            cached_socks_response = stream_data.get("syn_responses", {}).get(
+                "socks", {}
+            )
+            cached_socks_packet_type = int(
+                cached_socks_response.get("packet_type", 0) or 0
+            )
+            suppress_terminal_rst = (
+                abortive
+                and not remote_reset
+                and cached_socks_packet_type in self._socks5_rep_packet_map.values()
+            )
+            if abortive and not remote_reset and not suppress_terminal_rst:
                 rst_sn = stream_data.get("rst_seq_sent", 0)
                 stream_data["rst_sent"] = True
                 stream_data["rst_acked"] = False

@@ -68,6 +68,11 @@ SOCKS_HANDSHAKE_TIMEOUT = 300.0
 # Higher values increase bandwidth/CPU pressure quickly.
 PACKET_DUPLICATION_COUNT = 2
 
+# Setup/control packets for new streams are more sensitive to loss than normal data.
+# This value controls duplication for STREAM_SYN and SOCKS5_SYN only.
+# It should be >= PACKET_DUPLICATION_COUNT.
+SETUP_PACKET_DUPLICATION_COUNT = 3
+
 # Stream-level soft affinity: after this many STREAM_RESEND packets in a row,
 # switch the stream's preferred resolver if another active resolver is available.
 STREAM_RESOLVER_FAILOVER_RESEND_THRESHOLD = 2
@@ -78,7 +83,7 @@ STREAM_RESOLVER_FAILOVER_COOLDOWN = 1.0
 # Runtime value = min(MAX_PACKETS_PER_BATCH, MTU-based upload limit).
 # Upload MTU limit uses 50% of negotiated upload MTU: floor((MTU*0.50)/5).
 # 1 = disable batching.
-MAX_PACKETS_PER_BATCH = 100
+MAX_PACKETS_PER_BATCH = 5
 
 # Resolver balancing strategy:
 # 1=random, 2=round-robin, 3=least-loss, 4=lowest-latency
