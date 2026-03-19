@@ -1,9 +1,13 @@
 # ==============================================================================
-# MasterDnsVPN
+# MasterDnsVPN Go Client Configuration
 # Author: MasterkinG32
 # Github: https://github.com/masterking32
 # Year: 2026
 # ==============================================================================
+
+# ------------------------------------------------------------------------------
+# 1) Core Tunnel Mode
+# ------------------------------------------------------------------------------
 
 # Transport protocol between client and server:
 # - "SOCKS5": optimized proxy mode
@@ -13,39 +17,63 @@ PROTOCOL_TYPE = "SOCKS5"
 # Must match server DOMAIN values.
 DOMAINS = ["v.domain.com"]
 
+# ------------------------------------------------------------------------------
+# 2) Local TCP Mode
+# ------------------------------------------------------------------------------
+
 LISTEN_IP = "127.0.0.1"
 LISTEN_PORT = 1080
+
+# ------------------------------------------------------------------------------
+# 3) Local SOCKS5 Listener
+# ------------------------------------------------------------------------------
 
 LOCAL_SOCKS5_ENABLED = false
 LOCAL_SOCKS5_IP = "127.0.0.1"
 LOCAL_SOCKS5_PORT = 1080
 LOCAL_SOCKS5_HANDSHAKE_TIMEOUT_SECONDS = 10.0
+
 SOCKS5_AUTH = false
 SOCKS5_USER = ""
 SOCKS5_PASS = ""
+
+# ------------------------------------------------------------------------------
+# 4) Local DNS Listener & Cache
+# ------------------------------------------------------------------------------
 
 LOCAL_DNS_ENABLED = false
 LOCAL_DNS_IP = "127.0.0.1"
 LOCAL_DNS_PORT = 5353
 LOCAL_DNS_WORKERS = 2
 LOCAL_DNS_QUEUE_SIZE = 512
+
 LOCAL_DNS_CACHE_MAX_RECORDS = 2000
 LOCAL_DNS_CACHE_TTL_SECONDS = 3600.0
 LOCAL_DNS_PENDING_TIMEOUT_SECONDS = 30.0
 LOCAL_DNS_CACHE_PERSIST_TO_FILE = true
 LOCAL_DNS_CACHE_FLUSH_INTERVAL_SECONDS = 60.0
 
+# ------------------------------------------------------------------------------
+# 5) Resolver Selection & Health
+# ------------------------------------------------------------------------------
+
 # Resolver balancing strategy:
 # 0=Round Robin (default), 1=Random, 2=Round Robin, 3=Least Loss, 4=Lowest Latency
 RESOLVER_BALANCING_STRATEGY = 0
+
 AUTO_DISABLE_TIMEOUT_SERVERS = true
 AUTO_DISABLE_TIMEOUT_WINDOW_SECONDS = 300.0
 AUTO_DISABLE_TIMEOUT_MIN_OBSERVATIONS = 3
 AUTO_DISABLE_CHECK_INTERVAL_SECONDS = 1.0
+
 RECHECK_INACTIVE_SERVERS_ENABLED = true
 RECHECK_INACTIVE_INTERVAL_SECONDS = 1800.0
 RECHECK_SERVER_INTERVAL_SECONDS = 3.0
 RECHECK_BATCH_SIZE = 5
+
+# ------------------------------------------------------------------------------
+# 6) Stream & Control Queue Limits
+# ------------------------------------------------------------------------------
 
 # Hard cap for how many small control packets may be packed into one block.
 # The effective runtime value is also limited by 50% of synced upload MTU.
@@ -56,6 +84,10 @@ STREAM_TX_WINDOW = 4
 STREAM_TX_QUEUE_LIMIT = 128
 STREAM_TX_MAX_RETRIES = 24
 STREAM_TX_TTL_SECONDS = 120.0
+
+# ------------------------------------------------------------------------------
+# 7) Encoding, Compression & Encryption
+# ------------------------------------------------------------------------------
 
 # If true, MTU test responses request Base64 TXT payloads from server.
 # If false, server returns raw byte TXT payloads.
@@ -75,6 +107,10 @@ DATA_ENCRYPTION_METHOD = 1
 # Shared secret key with server (required on client).
 ENCRYPTION_KEY = ""
 
+# ------------------------------------------------------------------------------
+# 8) Initial MTU Sync
+# ------------------------------------------------------------------------------
+
 MIN_UPLOAD_MTU = 70
 MIN_DOWNLOAD_MTU = 150
 MAX_UPLOAD_MTU = 150
@@ -82,5 +118,9 @@ MAX_DOWNLOAD_MTU = 200
 MTU_TEST_RETRIES = 2
 MTU_TEST_TIMEOUT = 2.0
 MTU_TEST_PARALLELISM = 6
+
+# ------------------------------------------------------------------------------
+# 9) Logging
+# ------------------------------------------------------------------------------
 
 LOG_LEVEL = "INFO"

@@ -6,61 +6,65 @@
 # ==============================================================================
 
 # ------------------------------------------------------------------------------
-# 1) DNS Listener & UDP Socket
+# 1) UDP Listener & Workers
 # ------------------------------------------------------------------------------
 
 UDP_HOST = "0.0.0.0"
 UDP_PORT = 53
-
-# Number of concurrent UDP read loops on the same socket.
 UDP_READERS = 2
-
-# UDP socket buffer size in bytes.
-SOCKET_BUFFER_SIZE = 8388608
-
-# Maximum number of queued UDP requests waiting for workers.
-MAX_CONCURRENT_REQUESTS = 4096
-
-# Number of worker goroutines handling requests concurrently.
 DNS_REQUEST_WORKERS = 8
 
-# Maximum inbound UDP packet size to read in one operation.
-# Keep this large if you want full EDNS UDP packets without app-level truncation.
+SOCKET_BUFFER_SIZE = 8388608
+MAX_CONCURRENT_REQUESTS = 4096
 MAX_PACKET_SIZE = 65535
-
-# Minimum interval between overload/drop warning logs.
 DROP_LOG_INTERVAL_SECONDS = 2.0
 
-# Invalid session-cookie tracking window and warning threshold.
+# ------------------------------------------------------------------------------
+# 2) Session & Invalid Cookie Lifecycle
+# ------------------------------------------------------------------------------
+
 INVALID_COOKIE_WINDOW_SECONDS = 2.0
 INVALID_COOKIE_ERROR_THRESHOLD = 10
 
-# Active session lifecycle.
 SESSION_TIMEOUT_SECONDS = 300.0
 SESSION_CLEANUP_INTERVAL_SECONDS = 30.0
 CLOSED_SESSION_RETENTION_SECONDS = 600.0
+
+# ------------------------------------------------------------------------------
+# 3) Stream Queues & Retry Limits
+# ------------------------------------------------------------------------------
 
 # Hard cap for how many small control packets may be packed into one block.
 # The effective runtime value is also limited by 80% of session download MTU.
 MAX_PACKETS_PER_BATCH = 20
 
-# Maximum in-flight outbound stream packets per session on server side.
 STREAM_OUTBOUND_WINDOW = 4
 STREAM_OUTBOUND_QUEUE_LIMIT = 256
 STREAM_OUTBOUND_MAX_RETRIES = 24
 STREAM_OUTBOUND_TTL_SECONDS = 120.0
 
-# Upstream resolvers used for tunneled DNS queries.
+# ------------------------------------------------------------------------------
+# 4) DNS Upstream & Cache
+# ------------------------------------------------------------------------------
+
 DNS_UPSTREAM_SERVERS = ["1.1.1.1:53"]
 DNS_UPSTREAM_TIMEOUT = 4.0
-SOCKS_CONNECT_TIMEOUT = 8.0
 DNS_FRAGMENT_ASSEMBLY_TIMEOUT = 16.0
 DNS_CACHE_MAX_RECORDS = 2000
 DNS_CACHE_TTL_SECONDS = 3600.0
+
+# ------------------------------------------------------------------------------
+# 5) TCP Forward Mode
+# ------------------------------------------------------------------------------
+
+SOCKS_CONNECT_TIMEOUT = 8.0
 FORWARD_IP = ""
 FORWARD_PORT = 0
 
-# Allowed tunnel domains.
+# ------------------------------------------------------------------------------
+# 6) Tunnel Policy
+# ------------------------------------------------------------------------------
+
 DOMAIN = ["v.domain.com"]
 
 # Compression types allowed by server policy:
@@ -68,12 +72,13 @@ DOMAIN = ["v.domain.com"]
 SUPPORTED_UPLOAD_COMPRESSION_TYPES = [0, 1, 2, 3]
 SUPPORTED_DOWNLOAD_COMPRESSION_TYPES = [0, 1, 2, 3]
 
+# ------------------------------------------------------------------------------
+# 7) Encryption & Logging
+# ------------------------------------------------------------------------------
+
 # Encryption method:
 # 0=None, 1=XOR, 2=ChaCha20, 3=AES-128-GCM, 4=AES-192-GCM, 5=AES-256-GCM
 DATA_ENCRYPTION_METHOD = 1
 
-# File used to load or create the shared encryption key.
 ENCRYPTION_KEY_FILE = "encrypt_key.txt"
-
-# Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL
 LOG_LEVEL = "INFO"

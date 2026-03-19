@@ -31,93 +31,66 @@ func (c *Client) RunLocalSOCKS5Listener(ctx context.Context) error {
 	if c == nil || !c.cfg.LocalSOCKS5Enabled {
 		return nil
 	}
-	if err := c.startStream0Runtime(ctx); err != nil {
-		return err
-	}
-
-	listener, err := net.Listen("tcp", net.JoinHostPort(c.cfg.LocalSOCKS5IP, strconvItoa(c.cfg.LocalSOCKS5Port)))
-	if err != nil {
-		return err
-	}
-	defer listener.Close()
-
-	c.log.Infof(
-		"🧦 <green>Local SOCKS5 Listener Ready</green> <magenta>|</magenta> <blue>Addr</blue>: <cyan>%s:%d</cyan>",
-		c.cfg.LocalSOCKS5IP,
-		c.cfg.LocalSOCKS5Port,
+	return c.runLocalTCPAcceptLoop(
+		ctx,
+		net.JoinHostPort(c.cfg.LocalSOCKS5IP, strconv.Itoa(c.cfg.LocalSOCKS5Port)),
+		func() {
+			c.log.Infof(
+				"\U0001F9E6 <green>Local SOCKS5 Listener Ready</green> <magenta>|</magenta> <blue>Addr</blue>: <cyan>%s:%d</cyan>",
+				c.cfg.LocalSOCKS5IP,
+				c.cfg.LocalSOCKS5Port,
+			)
+		},
+		c.handleLocalSOCKS5Conn,
 	)
-
-	go func() {
-		<-ctx.Done()
-		_ = listener.Close()
-	}()
-
-	for {
-		conn, err := listener.Accept()
-		if err != nil {
-			if ctx.Err() != nil {
-				return nil
-			}
-			return err
-		}
-		go c.handleLocalSOCKS5Conn(conn)
-	}
 }
 
 func (c *Client) handleLocalSOCKS5Conn(conn net.Conn) {
-	handedOff := false
-	defer func() {
-		if recovered := recover(); recovered != nil && c.log != nil {
+	withLocalConnLifecycle(conn, func(recovered any) {
+		if c.log != nil {
 			c.log.Errorf(
-				"💥 <red>SOCKS5 Handler Panic Recovered</red> <magenta>|</magenta> <yellow>%v</yellow>",
+				"\U0001F4A5 <red>SOCKS5 Handler Panic Recovered</red> <magenta>|</magenta> <yellow>%v</yellow>",
 				recovered,
 			)
 		}
-		if !handedOff {
-			_ = conn.Close()
+	}, func() bool {
+		timeout := localHandshakeTimeout(time.Duration(c.cfg.LocalSOCKS5HandshakeSec*float64(time.Second)), 10*time.Second)
+		_ = conn.SetDeadline(time.Now().Add(timeout))
+
+		request, err := c.performSOCKS5Handshake(conn)
+		if err != nil {
+			if !errors.Is(err, errSOCKS5AuthFailed) {
+				_ = writeSOCKS5Failure(conn, 0x07)
+			}
+			return false
 		}
-	}()
 
-	timeout := time.Duration(c.cfg.LocalSOCKS5HandshakeSec * float64(time.Second))
-	if timeout <= 0 {
-		timeout = 10 * time.Second
-	}
-	_ = conn.SetDeadline(time.Now().Add(timeout))
-
-	request, err := c.performSOCKS5Handshake(conn)
-	if err != nil {
-		if !errors.Is(err, errSOCKS5AuthFailed) {
+		switch request.Command {
+		case 0x01:
+			streamID, openErr := c.OpenSOCKS5Stream(request.TargetPayload, timeout)
+			if openErr != nil {
+				_ = writeSOCKS5Failure(conn, mapSOCKS5FailureReply(openErr))
+				return false
+			}
+			if _, writeErr := conn.Write([]byte{0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0}); writeErr != nil {
+				return false
+			}
+			attachLocalStreamConn(c, streamID, conn, timeout)
+			return true
+		case 0x03:
+			_ = conn.SetDeadline(time.Time{})
+			if err := c.runLocalSOCKS5UDPAssociate(conn); err != nil && c.log != nil {
+				c.log.Debugf(
+					"\U0001F9E6 <yellow>SOCKS5 UDP Associate Closed</yellow> <magenta>|</magenta> <cyan>%v</cyan>",
+					err,
+				)
+			}
+			return false
+		default:
 			_ = writeSOCKS5Failure(conn, 0x07)
+			return false
 		}
-		return
-	}
-
-	switch request.Command {
-	case 0x01:
-		streamID, openErr := c.OpenSOCKS5Stream(request.TargetPayload, timeout)
-		if openErr != nil {
-			_ = writeSOCKS5Failure(conn, mapSOCKS5FailureReply(openErr))
-			return
-		}
-		if _, writeErr := conn.Write([]byte{0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0}); writeErr != nil {
-			return
-		}
-		_ = conn.SetDeadline(time.Time{})
-
-		stream := c.createStream(streamID, conn)
-		handedOff = true
-		go c.runLocalStreamReadLoop(stream, timeout)
-	case 0x03:
-		_ = conn.SetDeadline(time.Time{})
-		if err := c.runLocalSOCKS5UDPAssociate(conn); err != nil && c.log != nil {
-			c.log.Debugf(
-				"🧦 <yellow>SOCKS5 UDP Associate Closed</yellow> <magenta>|</magenta> <cyan>%v</cyan>",
-				err,
-			)
-		}
-	default:
-		_ = writeSOCKS5Failure(conn, 0x07)
-	}
+	})
 }
 
 func (c *Client) performSOCKS5Handshake(conn net.Conn) (socks5HandshakeRequest, error) {
@@ -304,10 +277,6 @@ func mapSOCKS5FailureReply(err error) byte {
 			return 0x01
 		}
 	}
-}
-
-func strconvItoa(value int) string {
-	return strconv.Itoa(value)
 }
 
 func (c *Client) runLocalSOCKS5UDPAssociate(conn net.Conn) error {
