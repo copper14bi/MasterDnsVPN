@@ -124,7 +124,9 @@ func (p *deferredSessionProcessor) RemoveLane(lane deferredSessionLane) {
 		return
 	}
 	p.mu.Lock()
-	delete(p.laneWorker, lane)
+	if len(p.laneWorker) != 0 {
+		delete(p.laneWorker, lane)
+	}
 	p.mu.Unlock()
 }
 

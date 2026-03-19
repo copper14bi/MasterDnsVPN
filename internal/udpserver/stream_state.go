@@ -206,26 +206,23 @@ func (s *streamStateStore) NextOutboundSequence(sessionID uint8, streamID uint16
 		return 0, false
 	}
 	record.LastActivityAt = now
-	record.OutboundSeq++
-	if record.OutboundSeq == 0 {
-		record.OutboundSeq = 1
+	nextSeq := record.OutboundSeq + 1
+	if nextSeq == 0 {
+		nextSeq = 1
 	}
-	return record.OutboundSeq, true
+	record.OutboundSeq = nextSeq
+	return nextSeq, true
 }
 
 func (s *streamStateStore) MarkReset(sessionID uint8, streamID uint16, sequenceNum uint16, now time.Time) bool {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	streams := s.sessions[sessionID]
-	if streams == nil {
-		return false
-	}
-	record := streams[streamID]
+	record := s.lookupLocked(sessionID, streamID)
 	if record == nil {
+		s.mu.Unlock()
 		return false
 	}
-	streamutil.SafeClose(record.UpstreamConn)
+	conn := record.UpstreamConn
 	record.UpstreamConn = nil
 	record.Connected = false
 	record.LastActivityAt = now
@@ -235,6 +232,9 @@ func (s *streamStateStore) MarkReset(sessionID uint8, streamID uint16, sequenceN
 	if len(streams) == 0 {
 		delete(s.sessions, sessionID)
 	}
+	s.mu.Unlock()
+
+	streamutil.SafeClose(conn)
 	return true
 }
 
@@ -262,11 +262,10 @@ func (s *streamStateStore) RemoveSession(sessionID uint8) {
 }
 
 func (s *streamStateStore) lookupLocked(sessionID uint8, streamID uint16) *streamStateRecord {
-	streams := s.sessions[sessionID]
-	if streams == nil {
-		return nil
+	if streams, ok := s.sessions[sessionID]; ok {
+		return streams[streamID]
 	}
-	return streams[streamID]
+	return nil
 }
 
 func cloneStreamStateRecord(record *streamStateRecord) *streamStateRecord {

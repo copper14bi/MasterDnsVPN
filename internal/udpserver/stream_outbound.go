@@ -75,7 +75,7 @@ func (s *streamOutboundStore) Enqueue(sessionID uint8, packet VpnProto.Packet) b
 	if session == nil {
 		session = &streamOutboundSession{
 			queue:     make([]VpnProto.Packet, 0, 8),
-			pending:   make([]outboundPendingPacket, 0, s.effectiveWindow()),
+			pending:   make([]outboundPendingPacket, 0, s.window),
 			rrCursor:  0,
 			retryBase: streamOutboundInitialRetryDelay,
 		}
@@ -87,7 +87,7 @@ func (s *streamOutboundStore) Enqueue(sessionID uint8, packet VpnProto.Packet) b
 		session.queue = append(session.queue, packet)
 		return true
 	}
-	if packet.PacketType == Enums.PACKET_STREAM_DATA && len(session.queue)+len(session.pending) >= s.effectiveQueueLimit() {
+	if packet.PacketType == Enums.PACKET_STREAM_DATA && len(session.queue)+len(session.pending) >= s.queueLimit {
 		return false
 	}
 	session.queue = append(session.queue, packet)
@@ -105,7 +105,7 @@ func (s *streamOutboundStore) Next(sessionID uint8, now time.Time) (VpnProto.Pac
 	if session == nil {
 		return VpnProto.Packet{}, false
 	}
-	if len(session.pending) < s.effectiveWindow() && len(session.queue) != 0 {
+	if len(session.pending) < s.window && len(session.queue) != 0 {
 		packet, ok := popNextOutboundPacket(session)
 		if !ok {
 			return VpnProto.Packet{}, false
@@ -442,26 +442,6 @@ func outboundPacketPriority(packetType uint8) int {
 	default:
 		return 5
 	}
-}
-
-func (s *streamOutboundStore) effectiveWindow() int {
-	if s == nil || s.window < 1 {
-		return 1
-	}
-	if s.window > 32 {
-		return 32
-	}
-	return s.window
-}
-
-func (s *streamOutboundStore) effectiveQueueLimit() int {
-	if s == nil || s.queueLimit < 1 {
-		return 256
-	}
-	if s.queueLimit > 8192 {
-		return 8192
-	}
-	return s.queueLimit
 }
 
 func streamOutboundRetryBase(session *streamOutboundSession) time.Duration {

@@ -1266,24 +1266,28 @@ func (s *Server) expireStalledOutboundStreams(sessionID uint8, now time.Time) {
 	if s == nil {
 		return
 	}
-	expired := s.streamOutbound.ExpireStalled(sessionID, now, s.streamOutboundMaxRetry, s.streamOutboundTTL)
+	streamOutbound := s.streamOutbound
+	expired := streamOutbound.ExpireStalled(sessionID, now, s.streamOutboundMaxRetry, s.streamOutboundTTL)
+	if len(expired) == 0 {
+		return
+	}
+	streams := s.streams
+	deferred := s.deferredSession
+	log := s.log
 	for _, streamID := range expired {
-		sequenceNum, ok := s.streams.NextOutboundSequence(sessionID, streamID, now)
+		sequenceNum, ok := streams.NextOutboundSequence(sessionID, streamID, now)
 		if !ok {
 			continue
 		}
-		_ = s.streams.MarkReset(sessionID, streamID, sequenceNum, now)
-		s.deferredSession.RemoveLane(deferredSessionLane{
-			sessionID: sessionID,
-			streamID:  streamID,
-		})
-		_ = s.streamOutbound.Enqueue(sessionID, VpnProto.Packet{
+		_ = streams.MarkReset(sessionID, streamID, sequenceNum, now)
+		deferred.RemoveLane(deferredSessionLane{sessionID: sessionID, streamID: streamID})
+		_ = streamOutbound.Enqueue(sessionID, VpnProto.Packet{
 			PacketType:  Enums.PACKET_STREAM_RST,
 			StreamID:    streamID,
 			SequenceNum: sequenceNum,
 		})
-		if s.log != nil {
-			s.log.Warnf(
+		if log != nil {
+			log.Warnf(
 				"🚧 <yellow>Stream ARQ Retry Budget Exhausted</yellow> <magenta>|</magenta> <blue>Session</blue>: <cyan>%d</cyan> <magenta>|</magenta> <blue>Stream</blue>: <cyan>%d</cyan>",
 				sessionID,
 				streamID,
