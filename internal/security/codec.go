@@ -165,13 +165,16 @@ func (c *Codec) xorCrypto(data []byte) ([]byte, error) {
 		return out, nil
 	}
 
-	keyIndex := 0
-	for i := 0; i < len(data); i++ {
-		out[i] = data[i] ^ key[keyIndex]
-		keyIndex++
-		if keyIndex == keyLen {
-			keyIndex = 0
+	fullBlocks := len(data) / keyLen
+	offset := 0
+	for block := 0; block < fullBlocks; block++ {
+		for i := 0; i < keyLen; i++ {
+			out[offset+i] = data[offset+i] ^ key[i]
 		}
+		offset += keyLen
+	}
+	for i := offset; i < len(data); i++ {
+		out[i] = data[i] ^ key[i-offset]
 	}
 	return out, nil
 }
@@ -187,10 +190,11 @@ func (c *Codec) chachaEncrypt(data []byte) ([]byte, error) {
 		return nil, fmt.Errorf("generate chacha20 nonce: %w", err)
 	}
 
-	stream, err := newPythonCompatibleChaCha20(c.key, nonce)
+	stream, err := chacha20.NewUnauthenticatedCipher(c.key, nonce[4:])
 	if err != nil {
 		return nil, err
 	}
+	stream.SetCounter(binary.LittleEndian.Uint32(nonce[:4]))
 	stream.XORKeyStream(out[chachaNonceSize:], data)
 	return out, nil
 }
@@ -205,10 +209,11 @@ func (c *Codec) chachaDecrypt(data []byte) ([]byte, error) {
 
 	nonce := data[:chachaNonceSize]
 	ciphertext := data[chachaNonceSize:]
-	stream, err := newPythonCompatibleChaCha20(c.key, nonce)
+	stream, err := chacha20.NewUnauthenticatedCipher(c.key, nonce[4:])
 	if err != nil {
 		return nil, err
 	}
+	stream.SetCounter(binary.LittleEndian.Uint32(nonce[:4]))
 
 	out := make([]byte, len(ciphertext))
 	stream.XORKeyStream(out, ciphertext)
@@ -261,25 +266,6 @@ func newAESGCM(key []byte) (cipher.AEAD, error) {
 		return nil, fmt.Errorf("create aes-gcm: %w", err)
 	}
 	return aead, nil
-}
-
-func newPythonCompatibleChaCha20(key []byte, nonce16 []byte) (cipher.Stream, error) {
-	if len(key) != chacha20.KeySize {
-		return nil, fmt.Errorf("create chacha20 cipher: wrong key size %d", len(key))
-	}
-	if len(nonce16) != chachaNonceSize {
-		return nil, fmt.Errorf("create chacha20 cipher: wrong nonce size %d", len(nonce16))
-	}
-
-	counter := binary.LittleEndian.Uint32(nonce16[:4])
-	nonce12 := nonce16[4:]
-
-	stream, err := chacha20.NewUnauthenticatedCipher(key, nonce12)
-	if err != nil {
-		return nil, fmt.Errorf("create chacha20 cipher: %w", err)
-	}
-	stream.SetCounter(counter)
-	return stream, nil
 }
 
 func deriveKey(method int, rawKey string) []byte {
