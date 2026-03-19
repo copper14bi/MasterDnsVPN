@@ -379,7 +379,7 @@ func (s *Server) handleTunnelCandidate(packet []byte, parsed DnsParser.LitePacke
 			return validation.response
 		}
 
-		if !s.handlePostSessionPacket(parsed, decision, vpnPacket, validation.record) {
+		if !s.handlePostSessionPacket(decision, vpnPacket, validation.record) {
 			return buildNoDataResponseLite(packet, parsed)
 		}
 
@@ -398,7 +398,7 @@ func (s *Server) handleTunnelCandidate(packet []byte, parsed DnsParser.LitePacke
 	}
 }
 
-func (s *Server) handlePostSessionPacket(parsed DnsParser.LitePacket, decision domainMatcher.Decision, vpnPacket VpnProto.Packet, sessionRecord *sessionRuntimeView) bool {
+func (s *Server) handlePostSessionPacket(decision domainMatcher.Decision, vpnPacket VpnProto.Packet, sessionRecord *sessionRuntimeView) bool {
 	switch vpnPacket.PacketType {
 	case Enums.PACKET_PACKED_CONTROL_BLOCKS:
 		return s.handlePackedControlBlocksRequest(vpnPacket, sessionRecord)
@@ -409,7 +409,7 @@ func (s *Server) handlePostSessionPacket(parsed DnsParser.LitePacket, decision d
 	case Enums.PACKET_STREAM_DATA_ACK, Enums.PACKET_STREAM_FIN_ACK, Enums.PACKET_STREAM_RST_ACK, Enums.PACKET_STREAM_SYN_ACK:
 		return s.handleStreamAckPacket(vpnPacket, sessionRecord)
 	case Enums.PACKET_DNS_QUERY_REQ:
-		return s.handleDNSQueryRequest(parsed, decision, vpnPacket, sessionRecord)
+		return s.handleDNSQueryRequest(decision, vpnPacket, sessionRecord)
 	case Enums.PACKET_STREAM_SYN:
 		return s.handleStreamSynRequest(vpnPacket, sessionRecord)
 	case Enums.PACKET_SOCKS5_SYN:
@@ -419,7 +419,6 @@ func (s *Server) handlePostSessionPacket(parsed DnsParser.LitePacket, decision d
 	case Enums.PACKET_STREAM_RST:
 		return s.handleStreamRSTRequest(vpnPacket, sessionRecord)
 	default:
-		_ = parsed
 		return false
 	}
 }
@@ -842,7 +841,7 @@ func fillMTUProbeBytes(dst []byte, pattern []byte) {
 	}
 }
 
-func (s *Server) handlePingRequest(vpnPacket VpnProto.Packet, sessionRecord *sessionRuntimeView) bool {
+func (s *Server) handlePingRequest(_ VpnProto.Packet, sessionRecord *sessionRuntimeView) bool {
 	return sessionRecord != nil
 }
 
@@ -1151,11 +1150,10 @@ func (s *Server) processDeferredStreamData(vpnPacket VpnProto.Packet) {
 	}
 }
 
-func (s *Server) handleDNSQueryRequest(parsed DnsParser.LitePacket, decision domainMatcher.Decision, vpnPacket VpnProto.Packet, sessionRecord *sessionRuntimeView) bool {
+func (s *Server) handleDNSQueryRequest(decision domainMatcher.Decision, vpnPacket VpnProto.Packet, sessionRecord *sessionRuntimeView) bool {
 	if sessionRecord == nil || vpnPacket.StreamID != 0 || !vpnPacket.HasSequenceNum {
 		return false
 	}
-	_ = parsed
 	run := func() {
 		s.processDeferredDNSQuery(decision, vpnPacket, sessionRecord)
 	}
