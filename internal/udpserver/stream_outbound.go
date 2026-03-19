@@ -8,7 +8,6 @@
 package udpserver
 
 import (
-	"slices"
 	"sync"
 	"time"
 
@@ -20,6 +19,9 @@ import (
 const streamOutboundInitialRetryDelay = 350 * time.Millisecond
 const streamOutboundMaxRetryDelay = 2 * time.Second
 const streamOutboundMinRetryDelay = 120 * time.Millisecond
+
+var streamOutboundAckTypeByPending = buildStreamOutboundAckTypeByPending()
+var streamOutboundAckRequired = buildStreamOutboundAckRequired()
 
 type streamOutboundStore struct {
 	mu         sync.Mutex
@@ -122,10 +124,10 @@ func (s *streamOutboundStore) Next(sessionID uint8, now time.Time) (VpnProto.Pac
 			return VpnProto.Packet{}, false
 		}
 		packet := vpnPacketFromQueued(dequeued.Packet)
-		retryBase := normalizeStreamOutboundRetryBase(session.retryBase)
-		if !requiresStreamOutboundAck(packet.PacketType) {
+		if !streamOutboundAckRequired[packet.PacketType] {
 			return packet, true
 		}
+		retryBase := sessionRetryBase(session)
 		session.pending = append(session.pending, outboundPendingPacket{
 			Packet:     packet,
 			CreatedAt:  now,
@@ -151,7 +153,7 @@ func (s *streamOutboundStore) Next(sessionID uint8, now time.Time) (VpnProto.Pac
 	packet := pending.Packet
 	delay := pending.RetryDelay
 	if delay <= 0 {
-		delay = normalizeStreamOutboundRetryBase(session.retryBase)
+		delay = sessionRetryBase(session)
 	}
 	pending.LastSentAt = now
 	pending.RetryAt = now.Add(delay)
@@ -185,21 +187,26 @@ func (s *streamOutboundStore) ExpireStalled(sessionID uint8, now time.Time, maxR
 
 	ttlDeadline := now.Add(-ttl)
 	expired := make([]uint16, 0, 2)
+	var expiredSet map[uint16]struct{}
 	for _, pending := range session.pending {
 		if pending.RetryCount < maxRetries && pending.CreatedAt.After(ttlDeadline) {
 			continue
 		}
-		if !slices.Contains(expired, pending.Packet.StreamID) {
-			expired = append(expired, pending.Packet.StreamID)
-		}
+		expired, expiredSet = appendUniqueExpiredStream(expired, expiredSet, pending.Packet.StreamID)
 	}
 	if len(expired) == 0 {
 		return nil
 	}
 
-	for _, streamID := range expired {
+	if len(expired) == 1 {
+		streamID := expired[0]
 		prunePendingStreamPackets(session, streamID)
 		session.scheduler.HandleStreamReset(streamID)
+	} else {
+		prunePendingStreamPacketSet(session, expired)
+		for _, streamID := range expired {
+			session.scheduler.HandleStreamReset(streamID)
+		}
 	}
 	if session.scheduler.Pending() == 0 && len(session.pending) == 0 {
 		delete(s.sessions, sessionID)
@@ -221,7 +228,7 @@ func (s *streamOutboundStore) Ack(sessionID uint8, packetType uint8, streamID ui
 	}
 	for idx := range session.pending {
 		pending := session.pending[idx]
-		if !matchesStreamOutboundAck(pending.Packet.PacketType, packetType) {
+		if streamOutboundAckTypeByPending[pending.Packet.PacketType] != packetType {
 			continue
 		}
 		if pending.Packet.StreamID != streamID || pending.Packet.SequenceNum != sequenceNum {
@@ -316,29 +323,71 @@ func prunePendingStreamPackets(session *streamOutboundSession, streamID uint16) 
 	session.pending = session.pending[:writeIdx]
 }
 
-func matchesStreamOutboundAck(pendingType uint8, ackType uint8) bool {
-	switch pendingType {
-	case Enums.PACKET_STREAM_DATA:
-		return ackType == Enums.PACKET_STREAM_DATA_ACK
-	case Enums.PACKET_STREAM_FIN:
-		return ackType == Enums.PACKET_STREAM_FIN_ACK
-	case Enums.PACKET_STREAM_RST:
-		return ackType == Enums.PACKET_STREAM_RST_ACK
+func prunePendingStreamPacketSet(session *streamOutboundSession, streamIDs []uint16) {
+	if session == nil || len(session.pending) == 0 || len(streamIDs) == 0 {
+		return
+	}
+	if len(streamIDs) == 1 {
+		prunePendingStreamPackets(session, streamIDs[0])
+		return
+	}
+
+	streamSet := make(map[uint16]struct{}, len(streamIDs))
+	for _, streamID := range streamIDs {
+		streamSet[streamID] = struct{}{}
+	}
+
+	writeIdx := 0
+	for _, pending := range session.pending {
+		if _, drop := streamSet[pending.Packet.StreamID]; drop {
+			continue
+		}
+		session.pending[writeIdx] = pending
+		writeIdx++
+	}
+	for idx := writeIdx; idx < len(session.pending); idx++ {
+		session.pending[idx] = outboundPendingPacket{}
+	}
+	session.pending = session.pending[:writeIdx]
+}
+
+func appendUniqueExpiredStream(dst []uint16, set map[uint16]struct{}, streamID uint16) ([]uint16, map[uint16]struct{}) {
+	if streamID == 0 {
+		return dst, set
+	}
+	switch len(dst) {
+	case 0:
+		return append(dst, streamID), set
+	case 1:
+		if dst[0] == streamID {
+			return dst, set
+		}
+		return append(dst, streamID), set
+	case 2:
+		if dst[0] == streamID || dst[1] == streamID {
+			return dst, set
+		}
+		return append(dst, streamID), set
 	default:
-		return false
+		if set == nil {
+			set = make(map[uint16]struct{}, len(dst)+1)
+			for _, existing := range dst {
+				set[existing] = struct{}{}
+			}
+		}
+		if _, exists := set[streamID]; exists {
+			return dst, set
+		}
+		set[streamID] = struct{}{}
+		return append(dst, streamID), set
 	}
 }
 
-func requiresStreamOutboundAck(packetType uint8) bool {
-	switch packetType {
-	case Enums.PACKET_STREAM_DATA, Enums.PACKET_STREAM_FIN, Enums.PACKET_STREAM_RST:
-		return true
-	default:
-		return false
+func sessionRetryBase(session *streamOutboundSession) time.Duration {
+	if session == nil {
+		return streamOutboundInitialRetryDelay
 	}
-}
-
-func normalizeStreamOutboundRetryBase(retryBase time.Duration) time.Duration {
+	retryBase := session.retryBase
 	if retryBase < streamOutboundMinRetryDelay {
 		return streamOutboundInitialRetryDelay
 	}
@@ -346,6 +395,22 @@ func normalizeStreamOutboundRetryBase(retryBase time.Duration) time.Duration {
 		return streamOutboundMaxRetryDelay
 	}
 	return retryBase
+}
+
+func buildStreamOutboundAckTypeByPending() [256]uint8 {
+	var values [256]uint8
+	values[Enums.PACKET_STREAM_DATA] = Enums.PACKET_STREAM_DATA_ACK
+	values[Enums.PACKET_STREAM_FIN] = Enums.PACKET_STREAM_FIN_ACK
+	values[Enums.PACKET_STREAM_RST] = Enums.PACKET_STREAM_RST_ACK
+	return values
+}
+
+func buildStreamOutboundAckRequired() [256]bool {
+	var values [256]bool
+	values[Enums.PACKET_STREAM_DATA] = true
+	values[Enums.PACKET_STREAM_FIN] = true
+	values[Enums.PACKET_STREAM_RST] = true
+	return values
 }
 
 func updateStreamOutboundRTO(session *streamOutboundSession, pending outboundPendingPacket, ackedAt time.Time) {

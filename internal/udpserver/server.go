@@ -383,7 +383,7 @@ func (s *Server) handleTunnelCandidate(packet []byte, parsed DnsParser.LitePacke
 			return buildNoDataResponseLite(packet, parsed)
 		}
 
-		return s.serveQueuedOrPong(packet, decision.RequestName, validation.record, vpnPacket.SessionID, time.Now())
+		return s.serveQueuedOrPong(packet, decision.RequestName, validation.record, time.Now())
 	}
 
 	switch vpnPacket.PacketType {
@@ -533,10 +533,8 @@ func (s *Server) buildSessionVPNResponse(questionPacket []byte, requestName stri
 	if record == nil {
 		return nil
 	}
-	sessionID := record.ID
-	sessionCookie := record.Cookie
-	packet.SessionID = sessionID
-	packet.SessionCookie = sessionCookie
+	packet.SessionID = record.ID
+	packet.SessionCookie = record.Cookie
 	response, err := DnsParser.BuildVPNResponsePacket(questionPacket, requestName, packet, record.ResponseBase64)
 	if err != nil {
 		return nil
@@ -556,10 +554,18 @@ func (s *Server) queueSessionPacket(sessionID uint8, packet VpnProto.Packet) boo
 	return s.streamOutbound.Enqueue(sessionID, target, packet)
 }
 
-func (s *Server) serveQueuedOrPong(questionPacket []byte, requestName string, sessionRecord *sessionRuntimeView, sessionID uint8, now time.Time) []byte {
+func (s *Server) queueMainSessionPacket(sessionID uint8, packet VpnProto.Packet) bool {
+	if s == nil || sessionID == 0 {
+		return false
+	}
+	return s.streamOutbound.Enqueue(sessionID, arq.QueueTargetMain, packet)
+}
+
+func (s *Server) serveQueuedOrPong(questionPacket []byte, requestName string, sessionRecord *sessionRuntimeView, now time.Time) []byte {
 	if sessionRecord == nil {
 		return nil
 	}
+	sessionID := sessionRecord.ID
 
 	s.expireStalledOutboundStreams(sessionID, now)
 	if queued, ok := s.streamOutbound.Next(sessionID, now); ok {
@@ -1335,7 +1341,7 @@ func (s *Server) expireStalledOutboundStreams(sessionID uint8, now time.Time) {
 		}
 		_ = streams.MarkReset(sessionID, streamID, sequenceNum, now)
 		deferred.RemoveLane(deferredSessionLane{sessionID: sessionID, streamID: streamID})
-		_ = s.queueSessionPacket(sessionID, VpnProto.Packet{
+		_ = s.queueMainSessionPacket(sessionID, VpnProto.Packet{
 			PacketType:  Enums.PACKET_STREAM_RST,
 			StreamID:    streamID,
 			SequenceNum: sequenceNum,

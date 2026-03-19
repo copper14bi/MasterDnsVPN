@@ -95,7 +95,6 @@ func TestHandlePingRequestServesQueuedOutboundPacket(t *testing.T) {
 		buildServerTestQuery(0x3003, "vpn.a.com", Enums.DNS_RECORD_TYPE_TXT),
 		"vpn.a.com",
 		record,
-		record.ID,
 		time.Now(),
 	)
 

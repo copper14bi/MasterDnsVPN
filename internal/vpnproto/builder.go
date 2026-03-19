@@ -28,25 +28,37 @@ func BuildRaw(opts BuildOptions) ([]byte, error) {
 	}
 
 	headerLen := HeaderRawSize(opts.PacketType)
-	raw := make([]byte, 0, headerLen+len(opts.Payload))
-	raw = append(raw, opts.SessionID, opts.PacketType)
+	raw := make([]byte, headerLen+len(opts.Payload))
+	offset := 0
+	raw[offset] = opts.SessionID
+	raw[offset+1] = opts.PacketType
+	offset += 2
 
 	if flags&packetFlagStream != 0 {
-		raw = append(raw, byte(opts.StreamID>>8), byte(opts.StreamID))
+		raw[offset] = byte(opts.StreamID >> 8)
+		raw[offset+1] = byte(opts.StreamID)
+		offset += 2
 	}
 	if flags&packetFlagSequence != 0 {
-		raw = append(raw, byte(opts.SequenceNum>>8), byte(opts.SequenceNum))
+		raw[offset] = byte(opts.SequenceNum >> 8)
+		raw[offset+1] = byte(opts.SequenceNum)
+		offset += 2
 	}
 	if flags&packetFlagFragment != 0 {
-		raw = append(raw, opts.FragmentID, opts.TotalFragments)
+		raw[offset] = opts.FragmentID
+		raw[offset+1] = opts.TotalFragments
+		offset += 2
 	}
 	if flags&packetFlagCompression != 0 {
-		raw = append(raw, opts.CompressionType)
+		raw[offset] = opts.CompressionType
+		offset++
 	}
 
-	raw = append(raw, opts.SessionCookie)
-	raw = append(raw, computeHeaderCheckByte(raw))
-	raw = append(raw, opts.Payload...)
+	raw[offset] = opts.SessionCookie
+	offset++
+	raw[offset] = computeHeaderCheckByte(raw[:offset])
+	offset++
+	copy(raw[offset:], opts.Payload)
 	return raw, nil
 }
 
