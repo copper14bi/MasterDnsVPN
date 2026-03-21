@@ -113,6 +113,15 @@ func (c *Client) new_stream(streamID uint16, conn net.Conn, targetPayload []byte
 		HandshakeLastProgress: now,
 	}
 
+	// Initialize and start the ARQ engine (Python-mirrored logic)
+	mtu := c.syncedUploadMTU
+	if mtu <= 0 {
+		mtu = 1200 // Safe default
+	}
+	a := NewARQ(streamID, s, conn, mtu)
+	s.Stream = a
+	a.Start()
+
 	c.streamsMu.Lock()
 	if c.active_streams == nil {
 		c.active_streams = make(map[uint16]*Stream_client)
@@ -169,19 +178,26 @@ func (s *Stream_client) GetQueuedPacket(packetType uint8, sequenceNum uint16) (*
 
 // Close gracefully shuts down the stream and releases all resources.
 func (s *Stream_client) Close() {
-	// 1. Close the network connection
+	// 1. Close the ARQ object if it exists
+	if s.Stream != nil {
+		if a, ok := s.Stream.(*ARQ); ok {
+			a.Close("Stream_client.Close called", false)
+		}
+	}
+
+	// 2. Close the network connection
 	if s.NetConn != nil {
 		_ = s.NetConn.Close()
 	}
 
-	// 2. Clear the TX queue and return all packets to the pool (Safety)
+	// 3. Clear the TX queue and return all packets to the pool (Safety)
 	if s.txQueue != nil {
 		s.txQueue.Clear(func(p *clientStreamTXPacket) {
 			s.ReleaseTXPacket(p)
 		})
 	}
 
-	// 3. Clear inbound buffer
+	// 4. Clear inbound buffer
 	s.PendingInboundData = nil
 	s.Status = "CLOSED"
 }
