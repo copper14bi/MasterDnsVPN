@@ -11,12 +11,6 @@ import (
 	"fmt"
 	"net"
 	"time"
-
-	"masterdnsvpn-go/internal/arq"
-	"masterdnsvpn-go/internal/dnscache"
-	"masterdnsvpn-go/internal/dnsparser"
-	Enums "masterdnsvpn-go/internal/enums"
-	VpnProto "masterdnsvpn-go/internal/vpnproto"
 )
 
 type DNSListener struct {
@@ -82,88 +76,11 @@ func (l *DNSListener) handleQuery(ctx context.Context, data []byte, addr *net.UD
 		return
 	}
 
-	// 1. Lite Parse DNS Query
-	lite, err := dnsparser.ParseDNSRequestLite(data)
-	if err != nil {
-		return
-	}
-
-	if !lite.HasQuestion {
-		return
-	}
-
-	question := lite.FirstQuestion
-	now := time.Now()
-
-	// 2. Check Local Cache & Handle Pending Status
-	if l.client.localDNSCache != nil {
-		key := dnscache.BuildKey(question.Name, question.Type, question.Class)
-		res := l.client.localDNSCache.LookupOrCreatePending(key, question.Name, question.Type, question.Class, now)
-
-		if res.Status == dnscache.StatusReady && len(res.Response) > 0 {
-			// Cache Hit - Rewrite Transaction ID and send back
-			resp := dnscache.PatchResponseForQuery(res.Response, data)
+	l.client.ProcessDNSQuery(data, addr, func(resp []byte) {
+		if l.conn != nil {
 			_, _ = l.conn.WriteToUDP(resp, addr)
-			l.client.log.Debugf("🔍 <green>DNS Cache Hit: %s (%d)</green>", question.Name, question.Type)
-			return
 		}
-
-		if res.Status == dnscache.StatusPending && !res.DispatchNeeded {
-			// Already pending in tunnel and within timeout, don't re-dispatch
-			l.client.log.Debugf("🔍 <yellow>DNS Query Pending: %s (%d)</yellow>", question.Name, question.Type)
-			return
-		}
-
-		// If res.DispatchNeeded is true, we proceed to tunnel dispatch
-	}
-
-	// 3. Dispatch to Tunnel
-	l.client.dispatchDNSQueryToTunnel(data, addr)
-}
-
-func (c *Client) dispatchDNSQueryToTunnel(query []byte, addr *net.UDPAddr) {
-	if !c.SessionReady() {
-		return
-	}
-
-	c.streamsMu.RLock()
-	s0, ok := c.active_streams[0]
-	c.streamsMu.RUnlock()
-
-	if !ok || s0 == nil {
-		return
-	}
-
-	arqObj, ok := s0.Stream.(*arq.ARQ)
-	if !ok {
-		return
-	}
-
-	// Calculate target MTU for fragments
-	mtu := c.syncedUploadMTU - VpnProto.MaxHeaderRawSize()
-	if mtu < 100 {
-		mtu = 120 // Absolute minimum fallback
-	}
-
-	fragments := fragmentPayload(query, mtu)
-	total := uint8(len(fragments))
-
-	// Generate a unique sequence number for this DNS query
-	sn := uint16(c.mtuProbeCounter.Add(1) & 0xFFFF)
-
-	// Store the waiter by sequence number
-	c.dnsWaiters.Store(sn, addr)
-
-	for i, frag := range fragments {
-		fragID := uint8(i)
-
-		// Send via ARQ as a control packet
-		arqObj.SendControlPacket(Enums.PACKET_DNS_QUERY_REQ, sn, fragID, total, frag, 3, true, nil)
-	}
-
-	if c.log != nil {
-		c.log.Infof("🧳 <green>DNS Query Redirected to Tunnel: <cyan>%d</cyan> bytes, <cyan>%d</cyan> fragments (Seq: <cyan>%d</cyan>)</green>", len(query), total, sn)
-	}
+	})
 }
 
 // DNS Cache Persistence Methods

@@ -64,9 +64,13 @@ func (l *TCPListener) Stop() {
 	}
 }
 
-// handleConnection is an empty placeholder for future protocol management.
+// handleConnection manages the SOCKS5 handshake and requests.
 func (l *TCPListener) handleConnection(ctx context.Context, conn net.Conn, protocolType string) {
-	// Placeholder: Do nothing yet, will implement SOCKS5/TCP logic later.
-	// l.client.log.Debugf("New %s connection accepted from %v", protocolType, conn.RemoteAddr())
-	_ = conn.Close() // Temporarily close to prevent leaks until implemented
+	if protocolType == "SOCKS5" {
+		l.client.HandleSOCKS5(ctx, conn)
+		return
+	}
+
+	// Placeholder for other protocols
+	_ = conn.Close()
 }
