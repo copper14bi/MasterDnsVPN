@@ -58,14 +58,17 @@ type arqDataItem struct {
 }
 
 type arqControlItem struct {
-	PacketType uint8
-	AckType    uint8
-	Payload    []byte
-	Priority   int
-	CreatedAt  time.Time
-	LastSentAt time.Time
-	Retries    int
-	CurrentRTO time.Duration
+	PacketType     uint8
+	SequenceNum    uint16
+	FragmentID     uint8
+	TotalFragments uint8
+	AckType        uint8
+	Payload        []byte
+	Priority       int
+	CreatedAt      time.Time
+	LastSentAt     time.Time
+	Retries        int
+	CurrentRTO     time.Duration
 }
 
 // ControlAckPairs maps requests to their exact ACK responses from Python
@@ -118,7 +121,7 @@ type ARQ struct {
 	rcvNxt        uint16
 	sndBuf        map[uint16]*arqDataItem
 	rcvBuf        map[uint16][]byte
-	controlSndBuf map[uint32]*arqControlItem // key: ptype << 16 | sn
+	controlSndBuf map[uint32]*arqControlItem // key: ptype << 24 | sn << 8 | fragID
 
 	// Stream lifecycle and flags
 	state        StreamState
@@ -861,14 +864,17 @@ func (a *ARQ) SendControlPacket(packetType uint8, sequenceNum uint16, fragmentID
 	}
 
 	a.controlSndBuf[key] = &arqControlItem{
-		PacketType: packetType,
-		AckType:    expectedAck,
-		Payload:    copyData,
-		Priority:   priority,
-		CreatedAt:  now,
-		LastSentAt: now,
-		Retries:    0,
-		CurrentRTO: initialRTO,
+		PacketType:     packetType,
+		SequenceNum:    sequenceNum,
+		FragmentID:     fragmentID,
+		TotalFragments: totalFragments,
+		AckType:        expectedAck,
+		Payload:        copyData,
+		Priority:       priority,
+		CreatedAt:      now,
+		LastSentAt:     now,
+		Retries:        0,
+		CurrentRTO:     initialRTO,
 	}
 
 	return true
@@ -999,7 +1005,7 @@ func (a *ARQ) checkControlRetransmits(now time.Time) {
 			continue
 		}
 
-		ok := a.enqueuer.PushTXPacket(info.Priority, info.PacketType, uint16(key&0xFFFF), 0, 0, info.Payload)
+		ok := a.enqueuer.PushTXPacket(info.Priority, info.PacketType, info.SequenceNum, info.FragmentID, info.TotalFragments, info.Payload)
 		if !ok {
 			delete(a.controlSndBuf, key)
 			continue

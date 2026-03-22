@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"masterdnsvpn-go/internal/arq"
+	Enums "masterdnsvpn-go/internal/enums"
 	"masterdnsvpn-go/internal/mlq"
 )
 
@@ -97,7 +98,11 @@ func putTXPacketToPool(p *serverStreamTXPacket) {
 }
 
 func getTrackingKey(packetType uint8, sequenceNum uint16, fragmentID uint8) uint32 {
-	return uint32(packetType)<<24 | uint32(sequenceNum)<<8 | uint32(fragmentID)
+	t := packetType
+	if t == Enums.PACKET_STREAM_RESEND {
+		t = Enums.PACKET_STREAM_DATA
+	}
+	return uint32(t)<<24 | uint32(sequenceNum)<<8 | uint32(fragmentID)
 }
 
 // getEffectivePriority maps packet types to priorities (0 is highest, 5 is lowest).

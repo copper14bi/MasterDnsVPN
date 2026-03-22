@@ -85,12 +85,6 @@ func (c *Client) StartAsyncRuntime(parentCtx context.Context) error {
 	c.log.Infof("\U0001F4E1 <cyan>Async Runtime Initialized: <green>%d Writes</green>, <green>%d Reads</green>, <green>%d Processors</green></cyan>",
 		c.tunnelWriterWorkers, c.tunnelReaderWorkers, c.tunnelProcessWorkers)
 
-	// 4. Initialize Virtual Stream 0 (Control Channel)
-	// c.initVirtualStream0()
-
-	// 5. Start support runtimes (DNS Cache, Health Monitor)
-	// c.StartSupportRuntimes(runtimeCtx)
-
 	// Start TCP/SOCKS Proxy Listener
 	c.tcpListener = NewTCPListener(c, c.cfg.ProtocolType)
 	if err := c.tcpListener.Start(runtimeCtx, c.cfg.ListenIP, c.cfg.ListenPort); err != nil {
@@ -280,7 +274,7 @@ func (c *Client) handleInboundPacket(data []byte, addr *net.UDPAddr) {
 // SendBurstPacket adds a packet to the transmission queue.
 func (c *Client) SendBurstPacket(conn Connection, payload []byte, packetType uint8) {
 	c.pingManager.NotifyPacket(packetType, false)
-	
+
 	domain := conn.Domain
 	if domain == "" {
 		domain = c.cfg.Domains[0]

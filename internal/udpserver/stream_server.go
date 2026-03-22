@@ -46,6 +46,7 @@ func NewStreamServer(streamID uint16, sessionID uint8, arqConfig arq.Config, loc
 	}
 
 	s.ARQ = arq.NewARQ(streamID, sessionID, s, localConn, mtu, logger, arqConfig)
+	s.ARQ.Start()
 	return s
 }
 
