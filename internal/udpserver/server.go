@@ -563,6 +563,7 @@ func (s *Server) queueImmediateControlAck(record *sessionRecord, packet VpnProto
 		packet.FragmentID,
 		packet.TotalFragments,
 		0,
+		0,
 		nil,
 	)
 }
@@ -776,7 +777,7 @@ func (s *Server) queueSessionPacket(sessionID uint8, packet VpnProto.Packet) boo
 
 	// Push to corresponding stream's TXQueue. Stream 0 is initialized in findOrCreate.
 	stream := record.getOrCreateStream(packet.StreamID, s.streamARQConfig(false), nil, s.log)
-	return stream.PushTXPacket(getEffectivePriority(packet.PacketType, 3), packet.PacketType, packet.SequenceNum, packet.FragmentID, packet.TotalFragments, packet.CompressionType, packet.Payload)
+	return stream.PushTXPacket(getEffectivePriority(packet.PacketType, 3), packet.PacketType, packet.SequenceNum, packet.FragmentID, packet.TotalFragments, packet.CompressionType, 0, packet.Payload)
 }
 
 func (s *Server) streamARQConfig(isSocks bool) arq.Config {

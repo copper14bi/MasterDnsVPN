@@ -65,7 +65,7 @@ func NewStreamServer(streamID uint16, sessionID uint8, arqConfig arq.Config, loc
 
 // PushTXPacket implements arq.PacketEnqueuer.
 // It adds a packet to the stream's multi-level queue.
-func (s *Stream_server) PushTXPacket(priority int, packetType uint8, sequenceNum uint16, fragmentID uint8, totalFragments uint8, compressionType uint8, payload []byte) bool {
+func (s *Stream_server) PushTXPacket(priority int, packetType uint8, sequenceNum uint16, fragmentID uint8, totalFragments uint8, compressionType uint8, ttl time.Duration, payload []byte) bool {
 	s.mu.Lock()
 	s.LastActivity = time.Now()
 	s.mu.Unlock()
@@ -85,6 +85,7 @@ func (s *Stream_server) PushTXPacket(priority int, packetType uint8, sequenceNum
 	pkt.CompressionType = compressionType
 	pkt.Payload = payload
 	pkt.CreatedAt = time.Now()
+	pkt.TTL = ttl
 
 	ok := s.TXQueue.Push(priority, key, pkt)
 	if !ok {

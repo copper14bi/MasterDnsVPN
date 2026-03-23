@@ -188,7 +188,7 @@ func (c *Client) new_stream(streamID uint16, conn net.Conn, targetPayload []byte
 }
 
 // PushTXPacket adds a packet to the appropriate priority queue if it's not a duplicate.
-func (s *Stream_client) PushTXPacket(priority int, packetType uint8, sequenceNum uint16, fragmentID uint8, totalFragments uint8, compressionType uint8, payload []byte) bool {
+func (s *Stream_client) PushTXPacket(priority int, packetType uint8, sequenceNum uint16, fragmentID uint8, totalFragments uint8, compressionType uint8, ttl time.Duration, payload []byte) bool {
 	// Generate the tracking key (Policy)
 	key := getTrackingKey(packetType, sequenceNum, fragmentID)
 
@@ -209,6 +209,7 @@ func (s *Stream_client) PushTXPacket(priority int, packetType uint8, sequenceNum
 	p.CompressionType = compressionType
 	p.Payload = payload
 	p.CreatedAt = time.Now()
+	p.TTL = ttl
 	p.RetryCount = 0
 	p.Scheduled = false
 
@@ -276,6 +277,7 @@ func (s *Stream_client) ReleaseTXPacket(p *clientStreamTXPacket) {
 		return
 	}
 	p.Payload = nil // Clear payload reference
+	p.TTL = 0
 	txPacketPool.Put(p)
 }
 

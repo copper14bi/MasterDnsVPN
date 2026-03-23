@@ -215,6 +215,7 @@ type clientStreamTXPacket struct {
 	CompressionType uint8
 	Payload         []byte
 	CreatedAt       time.Time
+	TTL             time.Duration
 	LastSentAt      time.Time
 	RetryDelay      time.Duration
 	RetryAt         time.Time

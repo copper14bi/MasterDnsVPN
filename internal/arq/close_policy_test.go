@@ -20,7 +20,7 @@ type recordingEnqueuer struct {
 	packets []recordedPacket
 }
 
-func (r *recordingEnqueuer) PushTXPacket(priority int, packetType uint8, sequenceNum uint16, fragmentID uint8, totalFragments uint8, compressionType uint8, payload []byte) bool {
+func (r *recordingEnqueuer) PushTXPacket(priority int, packetType uint8, sequenceNum uint16, fragmentID uint8, totalFragments uint8, compressionType uint8, ttl time.Duration, payload []byte) bool {
 	r.mu.Lock()
 	r.packets = append(r.packets, recordedPacket{
 		packetType:  packetType,

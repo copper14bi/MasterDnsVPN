@@ -34,7 +34,7 @@ const (
 
 // PacketEnqueuer abstracts the transmission layer (Client or Server stream)
 type PacketEnqueuer interface {
-	PushTXPacket(priority int, packetType uint8, sequenceNum uint16, fragmentID uint8, totalFragments uint8, compressionType uint8, payload []byte) bool
+	PushTXPacket(priority int, packetType uint8, sequenceNum uint16, fragmentID uint8, totalFragments uint8, compressionType uint8, ttl time.Duration, payload []byte) bool
 }
 
 type Logger interface {
@@ -56,6 +56,7 @@ type arqDataItem struct {
 	Retries         int
 	CurrentRTO      time.Duration
 	CompressionType uint8
+	TTL             time.Duration
 }
 
 type arqControlItem struct {
@@ -70,6 +71,7 @@ type arqControlItem struct {
 	LastSentAt     time.Time
 	Retries        int
 	CurrentRTO     time.Duration
+	TTL            time.Duration
 }
 
 var setupControlPacketTypes = map[uint8]bool{
@@ -415,13 +417,14 @@ func (a *ARQ) InjectOutboundData(data []byte) {
 			Retries:         0,
 			CurrentRTO:      a.rto,
 			CompressionType: a.compressionType,
+			TTL:             0,
 		}
 		if len(a.sndBuf) >= a.limit {
 			a.clearWindowNotFull()
 		}
 		a.mu.Unlock()
 
-		a.enqueuer.PushTXPacket(Enums.DefaultPacketPriority(Enums.PACKET_STREAM_DATA), Enums.PACKET_STREAM_DATA, sn, 0, 0, a.compressionType, chunk)
+		a.enqueuer.PushTXPacket(Enums.DefaultPacketPriority(Enums.PACKET_STREAM_DATA), Enums.PACKET_STREAM_DATA, sn, 0, 0, a.compressionType, 0, chunk)
 		offset = end
 	}
 }
@@ -604,9 +607,10 @@ func (a *ARQ) ioLoop() {
 				Retries:         0,
 				CurrentRTO:      a.rto,
 				CompressionType: a.compressionType,
+				TTL:             0,
 			}
 			a.mu.Unlock()
-			a.enqueuer.PushTXPacket(Enums.DefaultPacketPriority(Enums.PACKET_STREAM_DATA), Enums.PACKET_STREAM_DATA, sn, 0, 0, a.compressionType, chunk)
+			a.enqueuer.PushTXPacket(Enums.DefaultPacketPriority(Enums.PACKET_STREAM_DATA), Enums.PACKET_STREAM_DATA, sn, 0, 0, a.compressionType, 0, chunk)
 			offset += a.mtu
 		}
 	}
@@ -686,6 +690,7 @@ func (a *ARQ) ioLoop() {
 			Retries:         0,
 			CurrentRTO:      a.rto,
 			CompressionType: a.compressionType,
+			TTL:             0,
 		}
 
 		if len(a.sndBuf) >= a.limit {
@@ -693,7 +698,7 @@ func (a *ARQ) ioLoop() {
 		}
 		a.mu.Unlock()
 
-		a.enqueuer.PushTXPacket(Enums.DefaultPacketPriority(Enums.PACKET_STREAM_DATA), Enums.PACKET_STREAM_DATA, sn, 0, 0, a.compressionType, raw)
+		a.enqueuer.PushTXPacket(Enums.DefaultPacketPriority(Enums.PACKET_STREAM_DATA), Enums.PACKET_STREAM_DATA, sn, 0, 0, a.compressionType, 0, raw)
 	}
 
 	// Closure Handling Strategy
@@ -769,37 +774,6 @@ func (a *ARQ) initiateGracefulClose(reason string) {
 	a.mu.Unlock()
 
 	a.deferTerminalPacket(reason, Enums.PACKET_STREAM_FIN)
-	return
-
-	deadline := time.Now().Add(a.gracefulDrainTimeout)
-	for time.Now().Before(deadline) && !a.isClosed() {
-		a.mu.Lock()
-		if len(a.sndBuf) == 0 {
-			a.mu.Unlock()
-			break
-		}
-		a.mu.Unlock()
-		time.Sleep(50 * time.Millisecond)
-	}
-
-	if a.isClosed() {
-		return
-	}
-
-	a.mu.Lock()
-	leftovers := len(a.sndBuf) > 0
-	a.mu.Unlock()
-
-	if leftovers {
-		if a.isClient {
-			a.Abort(reason+" but send buffer did not drain", true)
-		} else {
-			a.deferGracefulClose(reason)
-		}
-		return
-	}
-
-	a.Close(reason, true)
 }
 
 func (a *ARQ) deferGracefulClose(reason string) {
@@ -1137,7 +1111,7 @@ func (a *ARQ) ReceiveData(sn uint16, data []byte) {
 
 	if diff >= 32768 { // Negative diff equivalent in uint16, packet is old
 		a.mu.Unlock()
-		a.enqueuer.PushTXPacket(Enums.DefaultPacketPriority(Enums.PACKET_STREAM_DATA_ACK), Enums.PACKET_STREAM_DATA_ACK, sn, 0, 0, 0, nil)
+		a.enqueuer.PushTXPacket(Enums.DefaultPacketPriority(Enums.PACKET_STREAM_DATA_ACK), Enums.PACKET_STREAM_DATA_ACK, sn, 0, 0, 0, 0, nil)
 		return
 	}
 
@@ -1158,7 +1132,7 @@ func (a *ARQ) ReceiveData(sn uint16, data []byte) {
 	a.mu.Unlock()
 
 	a.flushReadyLocalData()
-	a.enqueuer.PushTXPacket(Enums.DefaultPacketPriority(Enums.PACKET_STREAM_DATA_ACK), Enums.PACKET_STREAM_DATA_ACK, sn, 0, 0, 0, nil)
+	a.enqueuer.PushTXPacket(Enums.DefaultPacketPriority(Enums.PACKET_STREAM_DATA_ACK), Enums.PACKET_STREAM_DATA_ACK, sn, 0, 0, 0, 0, nil)
 	a.tryFinalizeRemoteEOF()
 }
 
@@ -1185,7 +1159,7 @@ func (a *ARQ) ReceiveAck(sn uint16) {
 func (a *ARQ) SendControlPacket(packetType uint8, sequenceNum uint16, fragmentID uint8, totalFragments uint8, payload []byte, priority int, trackForAck bool, customAckType *uint8) bool {
 	copyData := append([]byte(nil), payload...)
 	priority = Enums.NormalizePacketPriority(packetType, priority)
-	ok := a.enqueuer.PushTXPacket(priority, packetType, sequenceNum, fragmentID, totalFragments, 0, copyData)
+	ok := a.enqueuer.PushTXPacket(priority, packetType, sequenceNum, fragmentID, totalFragments, 0, 0, copyData)
 	if !ok {
 		return false
 	}
@@ -1235,6 +1209,7 @@ func (a *ARQ) SendControlPacket(packetType uint8, sequenceNum uint16, fragmentID
 		LastSentAt:     now,
 		Retries:        0,
 		CurrentRTO:     initialRTO,
+		TTL:            0,
 	}
 
 	return true
@@ -1354,7 +1329,7 @@ func (a *ARQ) checkRetransmits() {
 	a.mu.Unlock()
 
 	for _, j := range jobs {
-		a.enqueuer.PushTXPacket(Enums.DefaultPacketPriority(Enums.PACKET_STREAM_RESEND), Enums.PACKET_STREAM_RESEND, j.sn, 0, 0, j.compressionType, j.data)
+		a.enqueuer.PushTXPacket(Enums.DefaultPacketPriority(Enums.PACKET_STREAM_RESEND), Enums.PACKET_STREAM_RESEND, j.sn, 0, 0, j.compressionType, 0, j.data)
 	}
 
 	if a.enableControlReliability {
@@ -1388,7 +1363,7 @@ func (a *ARQ) checkControlRetransmits(now time.Time) {
 			continue
 		}
 
-		ok := a.enqueuer.PushTXPacket(info.Priority, info.PacketType, info.SequenceNum, info.FragmentID, info.TotalFragments, 0, info.Payload)
+		ok := a.enqueuer.PushTXPacket(info.Priority, info.PacketType, info.SequenceNum, info.FragmentID, info.TotalFragments, 0, info.TTL, info.Payload)
 		if !ok {
 			delete(a.controlSndBuf, key)
 			continue
@@ -1447,33 +1422,6 @@ func (a *ARQ) Abort(reason string, sendRst bool) {
 	}
 
 	a.emitTerminalPacket(Enums.PACKET_STREAM_RST, reason)
-	return
-
-	a.mu.Lock()
-	if a.closed || a.isVirtual {
-		a.mu.Unlock()
-		return
-	}
-	a.closeReason = reason
-	a.setState(StateReset)
-	a.deferredClose = false
-	a.deferredReason = ""
-	a.deferredDeadline = time.Time{}
-	a.mu.Unlock()
-
-	if sendRst && !a.rstSent && !a.rstReceived {
-		a.mu.Lock()
-		sn := a.sndNxt
-		a.mu.Unlock()
-		a.MarkRstSent(&sn)
-		ackType := uint8(Enums.PACKET_STREAM_RST_ACK)
-		a.SendControlPacket(Enums.PACKET_STREAM_RST, *a.rstSeqSent, 0, 0, nil, Enums.DefaultPacketPriority(Enums.PACKET_STREAM_RST), a.enableControlReliability, &ackType)
-	}
-
-	a.mu.Lock()
-	a.clearAllQueues()
-	a.mu.Unlock()
-	a.Close(reason, false)
 }
 
 func (a *ARQ) Close(reason string, sendFin bool) {
@@ -1482,44 +1430,6 @@ func (a *ARQ) Close(reason string, sendFin bool) {
 		return
 	}
 	a.finalizeClose(reason)
-	return
-
-	a.mu.Lock()
-	if a.closed || a.isVirtual {
-		a.mu.Unlock()
-		return
-	}
-	a.closeReason = reason
-	a.closed = true
-	a.deferredClose = false
-	a.deferredReason = ""
-	a.deferredDeadline = time.Time{}
-
-	if sendFin && !a.finSent && !a.rstSent && !a.rstReceived {
-		sn := a.sndNxt
-		a.mu.Unlock()
-		a.MarkFinSent(&sn)
-		ackType := uint8(Enums.PACKET_STREAM_FIN_ACK)
-		a.SendControlPacket(Enums.PACKET_STREAM_FIN, *a.finSeqSent, 0, 0, nil, Enums.DefaultPacketPriority(Enums.PACKET_STREAM_FIN), a.enableControlReliability, &ackType)
-		a.mu.Lock()
-	}
-
-	if a.state == StateReset || a.rstReceived || a.rstSent {
-		a.setState(StateReset)
-	} else if a.finSent && a.finReceived {
-		a.setState(StateTimeWait)
-	} else {
-		a.setState(StateClosing)
-	}
-
-	a.cancel()
-
-	if a.localConn != nil {
-		_ = a.localConn.Close()
-	}
-
-	a.clearAllQueues()
-	a.mu.Unlock()
 }
 
 // ForceClose permanently closes the ARQ stream regardless of IsVirtual.

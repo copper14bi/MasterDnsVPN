@@ -81,6 +81,7 @@ type serverStreamTXPacket struct {
 	CompressionType uint8
 	Payload         []byte
 	CreatedAt       time.Time
+	TTL             time.Duration
 }
 
 var txPacketPool = sync.Pool{
@@ -98,6 +99,7 @@ func putTXPacketToPool(p *serverStreamTXPacket) {
 		return
 	}
 	p.Payload = nil
+	p.TTL = 0
 	txPacketPool.Put(p)
 }
 

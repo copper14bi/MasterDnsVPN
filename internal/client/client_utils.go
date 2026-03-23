@@ -252,6 +252,7 @@ func (c *Client) queueImmediateControlAck(streamID uint16, packet VpnProto.Packe
 		packet.FragmentID,
 		packet.TotalFragments,
 		0,
+		0,
 		nil,
 	)
 }
