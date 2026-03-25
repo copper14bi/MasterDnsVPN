@@ -21,16 +21,18 @@ func (s *Server) handlePostSessionPacket(vpnPacket VpnProto.Packet, sessionRecor
 	}
 
 	if vpnPacket.PacketType == Enums.PACKET_PACKED_CONTROL_BLOCKS {
-		return s.handlePackedControlBlocksRequest(vpnPacket, sessionRecord)
+		s.handlePackedControlBlocksRequest(vpnPacket, sessionRecord)
+		return true
 	}
 
-	return s.dispatchPostSessionPacket(vpnPacket, sessionRecord)
+	s.dispatchPostSessionPacket(vpnPacket, sessionRecord)
+	return true
 }
 
 func (s *Server) dispatchPostSessionPacket(vpnPacket VpnProto.Packet, sessionRecord *sessionRuntimeView) bool {
 	switch vpnPacket.PacketType {
 	case Enums.PACKET_PING:
-		return s.handlePingRequest(vpnPacket, sessionRecord)
+		return true
 	case Enums.PACKET_STREAM_DATA, Enums.PACKET_STREAM_RESEND:
 		return s.handleStreamDataRequest(vpnPacket)
 	case Enums.PACKET_DNS_QUERY_REQ:
@@ -215,10 +217,6 @@ func (s *Server) preprocessInboundPacket(vpnPacket VpnProto.Packet) bool {
 	return false
 }
 
-func (s *Server) handlePingRequest(_ VpnProto.Packet, sessionRecord *sessionRuntimeView) bool {
-	return sessionRecord != nil
-}
-
 func (s *Server) handlePackedControlBlocksRequest(vpnPacket VpnProto.Packet, sessionRecord *sessionRuntimeView) bool {
 	if sessionRecord == nil || len(vpnPacket.Payload) < VpnProto.PackedControlBlockSize {
 		return false
@@ -230,6 +228,7 @@ func (s *Server) handlePackedControlBlocksRequest(vpnPacket VpnProto.Packet, ses
 		if packetType == Enums.PACKET_PACKED_CONTROL_BLOCKS {
 			return true
 		}
+
 		sawBlock = true
 		block := VpnProto.Packet{
 			SessionID:      vpnPacket.SessionID,
@@ -258,13 +257,15 @@ func (s *Server) handlePackedControlBlocksRequest(vpnPacket VpnProto.Packet, ses
 }
 
 func (s *Server) handleDNSQueryRequest(vpnPacket VpnProto.Packet, sessionRecord *sessionRuntimeView) bool {
-	if sessionRecord == nil || vpnPacket.StreamID != 0 || !vpnPacket.HasSequenceNum {
+	if sessionRecord == nil {
 		return false
 	}
+
 	totalFragments := vpnPacket.TotalFragments
 	if totalFragments == 0 {
 		totalFragments = 1
 	}
+
 	now := time.Now()
 	assembledQuery, ready, completed := s.collectDNSQueryFragments(
 		vpnPacket.SessionID,
@@ -274,9 +275,11 @@ func (s *Server) handleDNSQueryRequest(vpnPacket VpnProto.Packet, sessionRecord 
 		totalFragments,
 		now,
 	)
+
 	if completed {
 		return true
 	}
+
 	if !ready {
 		if s.log != nil && totalFragments == 1 {
 			s.log.Debugf(
@@ -299,9 +302,11 @@ func (s *Server) handleDNSQueryRequest(vpnPacket VpnProto.Packet, sessionRecord 
 			assembledQuery,
 		)
 	}
+
 	if !s.dispatchDeferredSessionPacket(vpnPacket, run) {
 		run()
 	}
+
 	return true
 }
 
@@ -317,6 +322,7 @@ func (s *Server) handleStreamSynRequest(vpnPacket VpnProto.Packet, sessionRecord
 	if !s.dispatchDeferredSessionPacket(vpnPacket, run) {
 		run()
 	}
+
 	return true
 }
 
@@ -359,18 +365,18 @@ func (s *Server) handleStreamDataRequest(vpnPacket VpnProto.Packet) bool {
 }
 
 func (s *Server) handleStreamFinRequest(vpnPacket VpnProto.Packet) bool {
-	if !vpnPacket.HasStreamID || vpnPacket.StreamID == 0 || !vpnPacket.HasSequenceNum {
+	if !vpnPacket.HasStreamID || vpnPacket.StreamID == 0 {
 		return false
 	}
 
 	record, ok := s.sessions.Get(vpnPacket.SessionID)
 	if !ok {
-		return false
+		return true
 	}
 
 	stream, exists := record.getStream(vpnPacket.StreamID)
 	if !exists || stream == nil {
-		return false
+		return true
 	}
 
 	stream.ARQ.MarkFinReceived()
@@ -384,7 +390,7 @@ func (s *Server) handleStreamRSTRequest(vpnPacket VpnProto.Packet) bool {
 
 	record, ok := s.sessions.Get(vpnPacket.SessionID)
 	if !ok {
-		return false
+		return true
 	}
 
 	now := time.Now()

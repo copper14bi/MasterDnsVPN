@@ -22,14 +22,17 @@ func (s *Server) processDeferredDNSQuery(sessionID uint8, sequenceNum uint16, do
 	if !s.sessions.HasActive(sessionID) {
 		return
 	}
+
 	rawResponse := s.buildDNSQueryResponsePayload(assembledQuery, sessionID, sequenceNum)
 	if len(rawResponse) == 0 {
 		return
 	}
+
 	fragments := s.fragmentDNSResponsePayload(rawResponse, downloadMTUBytes)
 	if len(fragments) == 0 {
 		return
 	}
+
 	totalFragments := uint8(len(fragments))
 	for fragmentID, fragmentPayload := range fragments {
 		_ = s.queueMainSessionPacket(sessionID, VpnProto.Packet{
