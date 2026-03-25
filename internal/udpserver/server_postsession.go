@@ -11,25 +11,30 @@ import (
 	"time"
 
 	"masterdnsvpn-go/internal/arq"
-	domainMatcher "masterdnsvpn-go/internal/domainmatcher"
 	Enums "masterdnsvpn-go/internal/enums"
 	VpnProto "masterdnsvpn-go/internal/vpnproto"
 )
 
-func (s *Server) handlePostSessionPacket(decision domainMatcher.Decision, vpnPacket VpnProto.Packet, sessionRecord *sessionRuntimeView) bool {
+func (s *Server) handlePostSessionPacket(vpnPacket VpnProto.Packet, sessionRecord *sessionRuntimeView) bool {
 	if handled := s.preprocessInboundPacket(vpnPacket); handled {
 		return true
 	}
 
-	switch vpnPacket.PacketType {
-	case Enums.PACKET_PACKED_CONTROL_BLOCKS:
+	if vpnPacket.PacketType == Enums.PACKET_PACKED_CONTROL_BLOCKS {
 		return s.handlePackedControlBlocksRequest(vpnPacket, sessionRecord)
+	}
+
+	return s.dispatchPostSessionPacket(vpnPacket, sessionRecord)
+}
+
+func (s *Server) dispatchPostSessionPacket(vpnPacket VpnProto.Packet, sessionRecord *sessionRuntimeView) bool {
+	switch vpnPacket.PacketType {
 	case Enums.PACKET_PING:
 		return s.handlePingRequest(vpnPacket, sessionRecord)
 	case Enums.PACKET_STREAM_DATA, Enums.PACKET_STREAM_RESEND:
 		return s.handleStreamDataRequest(vpnPacket, sessionRecord)
 	case Enums.PACKET_DNS_QUERY_REQ:
-		return s.handleDNSQueryRequest(decision, vpnPacket, sessionRecord)
+		return s.handleDNSQueryRequest(vpnPacket, sessionRecord)
 	case Enums.PACKET_STREAM_SYN:
 		return s.handleStreamSynRequest(vpnPacket, sessionRecord)
 	case Enums.PACKET_SOCKS5_SYN:
@@ -243,30 +248,16 @@ func (s *Server) handlePackedControlBlocksRequest(vpnPacket VpnProto.Packet, ses
 			return true
 		}
 
-		if s.handlePackedPostSessionBlock(block, sessionRecord) {
+		if s.dispatchPostSessionPacket(block, sessionRecord) {
 			handled = true
 		}
+
 		return true
 	})
 	return handled || sawBlock
 }
 
-func (s *Server) handlePackedPostSessionBlock(vpnPacket VpnProto.Packet, sessionRecord *sessionRuntimeView) bool {
-	switch vpnPacket.PacketType {
-	case Enums.PACKET_PING:
-		return s.handlePingRequest(vpnPacket, sessionRecord)
-	case Enums.PACKET_DNS_QUERY_RES_ACK:
-		return s.handleDNSQueryResponseAck(vpnPacket, sessionRecord)
-	case Enums.PACKET_STREAM_FIN:
-		return s.handleStreamFinRequest(vpnPacket, sessionRecord)
-	case Enums.PACKET_STREAM_RST:
-		return s.handleStreamRSTRequest(vpnPacket, sessionRecord)
-	default:
-		return false
-	}
-}
-
-func (s *Server) handleDNSQueryRequest(decision domainMatcher.Decision, vpnPacket VpnProto.Packet, sessionRecord *sessionRuntimeView) bool {
+func (s *Server) handleDNSQueryRequest(vpnPacket VpnProto.Packet, sessionRecord *sessionRuntimeView) bool {
 	if sessionRecord == nil || vpnPacket.StreamID != 0 || !vpnPacket.HasSequenceNum {
 		return false
 	}
@@ -275,16 +266,6 @@ func (s *Server) handleDNSQueryRequest(decision domainMatcher.Decision, vpnPacke
 		totalFragments = 1
 	}
 	now := time.Now()
-	if s.log != nil && totalFragments == 1 {
-		s.log.Debugf(
-			"\U0001F4E8 <green>Tunnel DNS Query Received</green> <magenta>|</magenta> <blue>Session</blue>: <cyan>%d</cyan> <magenta>|</magenta> <blue>Seq</blue>: <cyan>%d</cyan> <magenta>|</magenta> <blue>Frag</blue>: <cyan>%d/%d</cyan> <magenta>|</magenta> <blue>Domain</blue>: <cyan>%s</cyan>",
-			vpnPacket.SessionID,
-			vpnPacket.SequenceNum,
-			vpnPacket.FragmentID+1,
-			max(1, int(totalFragments)),
-			decision.RequestName,
-		)
-	}
 	assembledQuery, ready, completed := s.collectDNSQueryFragments(
 		vpnPacket.SessionID,
 		vpnPacket.SequenceNum,
@@ -384,9 +365,11 @@ func (s *Server) handleStreamDataRequest(vpnPacket VpnProto.Packet, sessionRecor
 	run := func() {
 		s.processDeferredStreamData(vpnPacket, sessionRecord)
 	}
+
 	if !s.dispatchDeferredSessionPacket(vpnPacket, run) {
 		run()
 	}
+
 	return true
 }
 

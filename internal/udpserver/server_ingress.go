@@ -61,7 +61,7 @@ func (s *Server) handleTunnelCandidate(packet []byte, parsed DnsParser.LitePacke
 			return validation.response
 		}
 
-		if !s.handlePostSessionPacket(decision, vpnPacket, validation.record) {
+		if !s.handlePostSessionPacket(vpnPacket, validation.record) {
 			return s.buildNoDataResponseLiteLogged(packet, parsed, fmt.Sprintf("post-session-unhandled-%s", Enums.PacketTypeName(vpnPacket.PacketType)))
 		}
 
