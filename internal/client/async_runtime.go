@@ -90,14 +90,8 @@ func (c *Client) resetRuntimeBindings(resetSession bool) {
 	c.closeResolverConnPools()
 	c.clearTxSignal()
 	c.clearSessionResetPending()
-
 	if resetSession {
-		c.sessionReady = false
-		c.sessionID = 0
-		c.sessionCookie = 0
-		c.responseMode = 0
-		c.clearSessionInitBusyUntil()
-		c.resetSessionInitState()
+		c.resetSessionState(true)
 	}
 }
 
@@ -108,6 +102,55 @@ func (c *Client) clearTxSignal() {
 	for {
 		select {
 		case <-c.txSignal:
+		default:
+			return
+		}
+	}
+}
+
+func (c *Client) resetSessionState(resetSessionCookie bool) {
+	if c == nil {
+		return
+	}
+	c.sessionReady = false
+	c.sessionID = 0
+	if resetSessionCookie {
+		c.sessionCookie = 0
+	}
+	c.responseMode = 0
+	c.clearSessionInitBusyUntil()
+	c.resetSessionInitState()
+}
+
+func (c *Client) requestSessionRestart(reason string) {
+	if c == nil {
+		return
+	}
+	if !c.runtimeResetPending.CompareAndSwap(false, true) {
+		return
+	}
+	if c.log != nil {
+		c.log.Warnf("🔄 <yellow>Session restart requested</yellow>: <cyan>%s</cyan>", reason)
+	}
+	if c.sessionResetSignal != nil {
+		select {
+		case c.sessionResetSignal <- struct{}{}:
+		default:
+		}
+	}
+}
+
+func (c *Client) clearRuntimeResetRequest() {
+	if c == nil {
+		return
+	}
+	c.runtimeResetPending.Store(false)
+	if c.sessionResetSignal == nil {
+		return
+	}
+	for {
+		select {
+		case <-c.sessionResetSignal:
 		default:
 			return
 		}

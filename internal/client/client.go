@@ -29,7 +29,11 @@ import (
 )
 
 const (
-	EDnsSafeUDPSize = 4096
+	EDnsSafeUDPSize             = 4096
+	sessionInitRetryBase        = 1 * time.Second
+	sessionInitRetryStep        = 1 * time.Second
+	sessionInitRetryLinearAfter = 5
+	sessionInitRetryMax         = 1 * time.Minute
 )
 
 type Client struct {
@@ -80,6 +84,8 @@ type Client struct {
 	sessionInitCursor   int
 	sessionInitBusyUnix atomic.Int64
 	sessionResetPending atomic.Bool
+	runtimeResetPending atomic.Bool
+	sessionResetSignal  chan struct{}
 
 	// Async Runtime Workers & Channels
 	asyncWG              sync.WaitGroup
@@ -231,15 +237,35 @@ func New(cfg config.ClientConfig, log *logger.Logger, codec *security.Codec) *Cl
 		localDNSCachePath:      cfg.LocalDNSCachePath(),
 		localDNSCacheFlushTick: time.Duration(cfg.LocalDNSCacheFlushSec) * time.Second,
 		orphanQueue:            mlq.New[VpnProto.Packet](8),
+		sessionResetSignal:     make(chan struct{}, 1),
 	}
 	c.pingManager = newPingManager(c)
 	return c
+}
+
+func nextSessionInitRetryDelay(failures int) time.Duration {
+	if failures <= 0 {
+		return 0
+	}
+
+	delay := sessionInitRetryBase
+	if failures > sessionInitRetryLinearAfter {
+		delay += time.Duration(failures-sessionInitRetryLinearAfter) * sessionInitRetryStep
+	}
+
+	if delay > sessionInitRetryMax {
+		return sessionInitRetryMax
+	}
+
+	return delay
 }
 
 // Run starts the main execution loop of the client.
 func (c *Client) Run(ctx context.Context) error {
 	c.successMTUChecks = false
 	c.log.Infof("\U0001F504 <cyan>Starting main runtime loop...</cyan>")
+	sessionInitRetryDelay := time.Duration(0)
+	sessionInitRetryFailures := 0
 
 	// Ensure local DNS cache is loaded from file if persistence is enabled
 	c.ensureLocalDNSCacheLoaded()
@@ -254,6 +280,7 @@ func (c *Client) Run(ctx context.Context) error {
 					c.log.Errorf("<red>MTU tests failed: %v</red>", err)
 					c.successMTUChecks = false
 					// Wait a bit before retrying or exiting if critical
+					c.log.Warnf("<yellow>Session init retry backoff: %s</yellow>", sessionInitRetryDelay)
 					select {
 					case <-ctx.Done():
 						return nil
@@ -283,16 +310,20 @@ func (c *Client) Run(ctx context.Context) error {
 				}
 
 				if err := c.InitializeSession(retries); err != nil {
+					sessionInitRetryFailures++
+					sessionInitRetryDelay = nextSessionInitRetryDelay(sessionInitRetryFailures)
 					c.log.Errorf("<red>❌ Session initialization failed: %v</red>", err)
 					select {
 					case <-ctx.Done():
 						return nil
-					case <-time.After(time.Second * 1):
+					case <-time.After(sessionInitRetryDelay):
 					}
 					continue
 				}
 				c.log.Infof("<green>✅ Session Initialized Successfully (ID: <cyan>%d</cyan>)</green>", c.sessionID)
 
+				sessionInitRetryFailures = 0
+				sessionInitRetryDelay = 0
 				if err := c.StartAsyncRuntime(ctx); err != nil {
 					c.log.Errorf("<red>❌ Async Runtime failed to launch: %v</red>", err)
 					return err
@@ -312,6 +343,17 @@ func (c *Client) Run(ctx context.Context) error {
 				c.notifySessionCloseBurst(time.Second)
 				c.StopAsyncRuntime()
 				return nil
+			case <-c.sessionResetSignal:
+				c.StopAsyncRuntime()
+				c.resetSessionState(true)
+				c.clearRuntimeResetRequest()
+				c.log.Errorf("<red>❌ Session reset requested, retrying in %s</red>", sessionInitRetryDelay)
+				select {
+				case <-ctx.Done():
+					return nil
+				case <-time.After(sessionInitRetryDelay):
+				}
+				continue
 			case <-time.After(1 * time.Second):
 			}
 		}
@@ -364,12 +406,17 @@ func (c *Client) HandleStreamPacket(packet VpnProto.Packet) error {
 }
 
 func (c *Client) HandleSessionReject(packet VpnProto.Packet) error {
-	// TODO: Implementing session rejection logic
+	c.requestSessionRestart("session reject received")
 	return nil
 }
 
 func (c *Client) HandleSessionBusy() error {
-	// TODO: Implementing session busy logic
+	c.requestSessionRestart("session busy received")
+	return nil
+}
+
+func (c *Client) HandleErrorDrop(packet VpnProto.Packet) error {
+	c.requestSessionRestart("error drop received")
 	return nil
 }
 

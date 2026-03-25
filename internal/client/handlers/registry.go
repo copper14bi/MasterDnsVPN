@@ -31,6 +31,7 @@ type ClientContext interface {
 	// Session Management
 	HandleSessionReject(packet VpnProto.Packet) error
 	HandleSessionBusy() error
+	HandleErrorDrop(packet VpnProto.Packet) error
 
 	// MTU Management
 	HandleMTUResponse(packet VpnProto.Packet) error

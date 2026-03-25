@@ -10,6 +10,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"sync"
 	"time"
 
 	"masterdnsvpn-go/internal/arq"
@@ -28,6 +29,7 @@ type DNSListener struct {
 	client   *Client
 	conn     *net.UDPConn
 	stopChan chan struct{}
+	stopOnce sync.Once
 }
 
 func NewDNSListener(c *Client) *DNSListener {
@@ -75,10 +77,16 @@ func (l *DNSListener) Start(ctx context.Context, ip string, port int) error {
 }
 
 func (l *DNSListener) Stop() {
-	close(l.stopChan)
-	if l.conn != nil {
-		_ = l.conn.Close()
+	if l == nil {
+		return
 	}
+	l.stopOnce.Do(func() {
+		close(l.stopChan)
+		if l.conn != nil {
+			_ = l.conn.Close()
+			l.conn = nil
+		}
+	})
 }
 
 // handleQuery manages incoming DNS queries by checking the local cache or redirecting to the tunnel.

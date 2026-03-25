@@ -10,6 +10,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"sync"
 )
 
 type TCPListener struct {
@@ -17,6 +18,7 @@ type TCPListener struct {
 	protocolType string
 	listener     net.Listener
 	stopChan     chan struct{}
+	stopOnce     sync.Once
 }
 
 func NewTCPListener(c *Client, protocolType string) *TCPListener {
@@ -58,10 +60,16 @@ func (l *TCPListener) Start(ctx context.Context, ip string, port int) error {
 }
 
 func (l *TCPListener) Stop() {
-	close(l.stopChan)
-	if l.listener != nil {
-		_ = l.listener.Close()
+	if l == nil {
+		return
 	}
+	l.stopOnce.Do(func() {
+		close(l.stopChan)
+		if l.listener != nil {
+			_ = l.listener.Close()
+			l.listener = nil
+		}
+	})
 }
 
 // handleConnection manages the local proxy/TCP forwarding handshake and requests.

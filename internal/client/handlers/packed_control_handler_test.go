@@ -1,3 +1,9 @@
+// ==============================================================================
+// MasterDnsVPN
+// Author: MasterkinG32
+// Github: https://github.com/masterking32
+// Year: 2026
+// ==============================================================================
 package handlers
 
 import (
@@ -32,7 +38,8 @@ func (m *packedTestClientContext) HandleStreamPacket(packet VpnProto.Packet) err
 func (m *packedTestClientContext) HandleSessionReject(packet VpnProto.Packet) error {
 	return nil
 }
-func (m *packedTestClientContext) HandleSessionBusy() error { return nil }
+func (m *packedTestClientContext) HandleSessionBusy() error                     { return nil }
+func (m *packedTestClientContext) HandleErrorDrop(packet VpnProto.Packet) error { return nil }
 func (m *packedTestClientContext) HandleMTUResponse(packet VpnProto.Packet) error {
 	return nil
 }
