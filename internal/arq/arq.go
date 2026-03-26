@@ -16,6 +16,7 @@ import (
 	"io"
 	"net"
 	"sync"
+	"syscall"
 	"time"
 
 	Enums "masterdnsvpn-go/internal/enums"
@@ -176,6 +177,10 @@ type closeWriter interface {
 	CloseWrite() error
 }
 
+type writeDeadlineSetter interface {
+	SetWriteDeadline(time.Time) error
+}
+
 type ioErrorClass int
 
 const (
@@ -210,6 +215,11 @@ func classifyIOError(err error) ioErrorClass {
 	}
 	var opErr *net.OpError
 	if errors.As(err, &opErr) {
+		if errors.Is(opErr.Err, syscall.EAGAIN) || errors.Is(opErr.Err, syscall.EWOULDBLOCK) || errors.Is(opErr.Err, syscall.EINTR) {
+			return ioErrorTransient
+		}
+	}
+	if errors.Is(err, syscall.EAGAIN) || errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EINTR) {
 		return ioErrorTransient
 	}
 	return ioErrorFatal
@@ -1021,7 +1031,7 @@ func (a *ARQ) writeLoop() {
 
 			if a.localConn == nil {
 				a.mu.Unlock()
-				a.Close("Local connection missing for writer", CloseOptions{SendRST: true})
+				a.Close("Local connection missing for writer", CloseOptions{SendRST: true, AfterDrain: true})
 				return
 			}
 
@@ -1044,53 +1054,77 @@ func (a *ARQ) writeLoop() {
 				break
 			}
 
-			for _, chunk := range toWrite {
-				remaining := chunk
-				transientRetries := 0
-				for len(remaining) > 0 {
-					a.writeLock.Lock()
-					n, err := conn.Write(remaining)
-					a.writeLock.Unlock()
-					if n > 0 {
-						remaining = remaining[n:]
+			shouldExit := false
+			recheckFIN := false
+			func() {
+				defer func() {
+					a.mu.Lock()
+					a.localWritePending = false
+					a.mu.Unlock()
+					if recheckFIN {
+						a.tryFinalizeRemoteEOF()
 					}
-					if err == nil {
-						continue
-					}
+				}()
 
-					class := classifyIOError(err)
-					if class == ioErrorTimeout || class == ioErrorTransient {
-						if transientRetries >= ioTransientWriteBudget {
-							if a.isGracefulCloseInProgress() {
+				for _, chunk := range toWrite {
+					remaining := chunk
+					transientRetries := 0
+					for len(remaining) > 0 {
+						if wd, ok := conn.(writeDeadlineSetter); ok {
+							_ = wd.SetWriteDeadline(time.Now().Add(500 * time.Millisecond))
+						}
+						a.writeLock.Lock()
+						n, err := conn.Write(remaining)
+						a.writeLock.Unlock()
+						if n > 0 {
+							remaining = remaining[n:]
+						}
+						if err == nil {
+							continue
+						}
+
+						class := classifyIOError(err)
+						if class == ioErrorTimeout || class == ioErrorTransient {
+							if transientRetries >= ioTransientWriteBudget {
+								if a.isGracefulCloseInProgress() {
+									recheckFIN = true
+									shouldExit = true
+									return
+								}
+								a.Close("Local App Write Error: "+err.Error(), CloseOptions{SendRST: true, AfterDrain: true})
+								shouldExit = true
 								return
 							}
-							a.Close("Local App Write Error: "+err.Error(), CloseOptions{SendRST: true})
+							transientRetries++
+							time.Sleep(ioRetryBackoff)
+							continue
+						}
+
+						if class == ioErrorEOF || class == ioErrorClosed {
+							if a.isGracefulCloseInProgress() {
+								recheckFIN = true
+								shouldExit = true
+								return
+							}
+							a.Close("Local App Closed Connection (writer closed)", CloseOptions{SendRST: true, AfterDrain: true})
+							shouldExit = true
 							return
 						}
-						transientRetries++
-						time.Sleep(ioRetryBackoff)
-						continue
-					}
 
-					if class == ioErrorEOF || class == ioErrorClosed {
 						if a.isGracefulCloseInProgress() {
+							recheckFIN = true
+							shouldExit = true
 							return
 						}
-						a.Close("Local App Closed Connection (writer closed)", CloseOptions{SendRST: true})
+						a.Close("Local App Write Error: "+err.Error(), CloseOptions{SendRST: true, AfterDrain: true})
+						shouldExit = true
 						return
 					}
-
-					if a.isGracefulCloseInProgress() {
-						return
-					}
-					a.Close("Local App Write Error: "+err.Error(), CloseOptions{SendRST: true})
-					return
 				}
+			}()
+			if shouldExit {
+				return
 			}
-
-			a.mu.Lock()
-			a.localWritePending = false
-			a.mu.Unlock()
 			a.tryFinalizeRemoteEOF()
 		}
 	}

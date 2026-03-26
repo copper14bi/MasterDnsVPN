@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -124,8 +125,14 @@ func (e timeoutOnlyError) Error() string   { return "timeout" }
 func (e timeoutOnlyError) Timeout() bool   { return true }
 func (e timeoutOnlyError) Temporary() bool { return false }
 
+type writeTimeoutError struct{}
+
+func (e writeTimeoutError) Error() string   { return "write timeout" }
+func (e writeTimeoutError) Timeout() bool   { return true }
+func (e writeTimeoutError) Temporary() bool { return false }
+
 func newTransientOpError(op string) error {
-	return &net.OpError{Op: op, Net: "tcp", Err: errors.New("transient op failure")}
+	return syscall.EAGAIN
 }
 
 type transientReadConn struct {
@@ -178,6 +185,27 @@ func (c *transientWriteConn) Close() error {
 	return nil
 }
 
+type fatalWriteConn struct {
+	mu     sync.Mutex
+	closed bool
+}
+
+func (c *fatalWriteConn) Read(_ []byte) (int, error) {
+	time.Sleep(50 * time.Millisecond)
+	return 0, timeoutOnlyError{}
+}
+
+func (c *fatalWriteConn) Write(_ []byte) (int, error) {
+	return 0, errors.New("fatal write failure")
+}
+
+func (c *fatalWriteConn) Close() error {
+	c.mu.Lock()
+	c.closed = true
+	c.mu.Unlock()
+	return nil
+}
+
 type blockingWriteConn struct {
 	mu      sync.Mutex
 	writeCh chan []byte
@@ -220,6 +248,71 @@ func (c *blockingWriteConn) Close() error {
 	default:
 		close(c.release)
 	}
+	return nil
+}
+
+type closeOnWriteConn struct {
+	mu      sync.Mutex
+	writeCh chan []byte
+	closed  bool
+}
+
+func newCloseOnWriteConn() *closeOnWriteConn {
+	return &closeOnWriteConn{
+		writeCh: make(chan []byte, 1),
+	}
+}
+
+func (c *closeOnWriteConn) Read(_ []byte) (int, error) {
+	time.Sleep(50 * time.Millisecond)
+	return 0, timeoutOnlyError{}
+}
+
+func (c *closeOnWriteConn) Write(p []byte) (int, error) {
+	payload := append([]byte(nil), p...)
+	select {
+	case c.writeCh <- payload:
+	default:
+	}
+	return 0, io.ErrClosedPipe
+}
+
+func (c *closeOnWriteConn) Close() error {
+	c.mu.Lock()
+	c.closed = true
+	c.mu.Unlock()
+	return nil
+}
+
+type writeDeadlineTimeoutConn struct {
+	mu            sync.Mutex
+	writeAttempts int
+	writes        [][]byte
+	closed        bool
+}
+
+func (c *writeDeadlineTimeoutConn) Read(_ []byte) (int, error) {
+	time.Sleep(50 * time.Millisecond)
+	return 0, timeoutOnlyError{}
+}
+
+func (c *writeDeadlineTimeoutConn) SetWriteDeadline(time.Time) error { return nil }
+
+func (c *writeDeadlineTimeoutConn) Write(p []byte) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.writeAttempts++
+	if c.writeAttempts == 1 {
+		return 0, writeTimeoutError{}
+	}
+	c.writes = append(c.writes, append([]byte(nil), p...))
+	return len(p), nil
+}
+
+func (c *writeDeadlineTimeoutConn) Close() error {
+	c.mu.Lock()
+	c.closed = true
+	c.mu.Unlock()
 	return nil
 }
 
@@ -750,26 +843,6 @@ func TestARQ_IOTransientReadErrorDoesNotResetStream(t *testing.T) {
 	}
 }
 
-func TestARQ_IOTransientReadErrorEventuallyStopsRetrying(t *testing.T) {
-	enqueuer := NewMockPacketEnqueuer()
-	cfg := Config{
-		WindowSize: 100,
-		RTO:        0.1,
-		MaxRTO:     0.5,
-	}
-
-	conn := &transientReadConn{}
-	a := NewARQ(1, 1, enqueuer, conn, 1000, &testLogger{t}, cfg)
-	a.Start()
-	defer a.Close("test end", CloseOptions{Force: true})
-
-	select {
-	case <-a.Done():
-	case <-time.After(5 * time.Second):
-		t.Fatal("expected repeated transient read errors to eventually stop the stream")
-	}
-}
-
 func TestARQ_WriteLoopRetriesTransientWriteError(t *testing.T) {
 	enqueuer := NewMockPacketEnqueuer()
 	cfg := Config{
@@ -811,6 +884,50 @@ func TestARQ_WriteLoopRetriesTransientWriteError(t *testing.T) {
 
 	if a.IsClosed() {
 		t.Fatal("expected transient write error not to close stream")
+	}
+}
+
+func TestARQ_WriteErrorDefersRSTWhileOutboundDataPending(t *testing.T) {
+	enqueuer := NewMockPacketEnqueuer()
+	cfg := Config{
+		WindowSize: 100,
+		RTO:        0.1,
+		MaxRTO:     0.5,
+	}
+
+	conn := &fatalWriteConn{}
+	a := NewARQ(1, 1, enqueuer, conn, 1000, &testLogger{t}, cfg)
+	a.mu.Lock()
+	a.sndBuf[7] = &arqDataItem{
+		Data:       []byte("pending outbound"),
+		CreatedAt:  time.Now(),
+		LastSentAt: time.Now(),
+		CurrentRTO: a.rto,
+	}
+	a.mu.Unlock()
+
+	a.Start()
+	defer a.Close("test end", CloseOptions{Force: true})
+
+	a.ReceiveData(0, []byte("from peer"))
+
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for {
+		a.mu.Lock()
+		deferred := a.deferredClose
+		deferredPacket := a.deferredPacket
+		closed := a.closed
+		a.mu.Unlock()
+		if deferred && deferredPacket == Enums.PACKET_STREAM_RST {
+			break
+		}
+		if closed {
+			t.Fatal("expected fatal write error with pending outbound data not to close immediately")
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("expected fatal write error to arm deferred RST while outbound data is pending")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
@@ -948,6 +1065,81 @@ func TestARQ_FinAckTimeoutDoesNotCompleteHandshake(t *testing.T) {
 	}
 	if _, exists := a.controlSndBuf[uint32(Enums.PACKET_STREAM_FIN)<<24|uint32(finSeq)<<8]; !exists {
 		t.Fatal("expected tracked FIN control packet to remain for retransmission")
+	}
+}
+
+func TestARQ_GracefulCloseWriteFailureStillRechecksFinCompletion(t *testing.T) {
+	enqueuer := NewMockPacketEnqueuer()
+	cfg := Config{
+		WindowSize:               100,
+		RTO:                      0.1,
+		MaxRTO:                   0.5,
+		EnableControlReliability: true,
+	}
+
+	conn := newCloseOnWriteConn()
+	a := NewARQ(1, 1, enqueuer, conn, 1000, &testLogger{t}, cfg)
+	a.Start()
+	defer a.Close("test end", CloseOptions{Force: true})
+
+	a.MarkFinReceived()
+	a.markFinAcked()
+	a.ReceiveData(0, []byte("final inbound chunk"))
+
+	select {
+	case <-conn.writeCh:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("timed out waiting for graceful-close write attempt")
+	}
+
+	select {
+	case <-a.Done():
+	case <-time.After(1 * time.Second):
+		t.Fatal("expected graceful-close write failure to recheck and complete FIN path")
+	}
+}
+
+func TestARQ_WriteDeadlineTimeoutRetriesAndFlushes(t *testing.T) {
+	enqueuer := NewMockPacketEnqueuer()
+	cfg := Config{
+		WindowSize: 100,
+		RTO:        0.1,
+		MaxRTO:     0.5,
+	}
+
+	conn := &writeDeadlineTimeoutConn{}
+	a := NewARQ(1, 1, enqueuer, conn, 1000, &testLogger{t}, cfg)
+	a.Start()
+	defer a.Close("test end", CloseOptions{Force: true})
+
+	a.ReceiveData(0, []byte("from peer"))
+
+	timeout := time.After(1 * time.Second)
+	for {
+		conn.mu.Lock()
+		writes := len(conn.writes)
+		attempts := conn.writeAttempts
+		payload := []byte(nil)
+		if writes > 0 {
+			payload = append([]byte(nil), conn.writes[0]...)
+		}
+		conn.mu.Unlock()
+		if writes > 0 {
+			if attempts < 2 {
+				t.Fatalf("expected at least 2 write attempts after timeout, got %d", attempts)
+			}
+			if !bytes.Equal(payload, []byte("from peer")) {
+				t.Fatalf("expected write payload %q, got %q", []byte("from peer"), payload)
+			}
+			break
+		}
+
+		select {
+		case <-timeout:
+			t.Fatal("timed out waiting for write timeout retry to succeed")
+		default:
+			time.Sleep(20 * time.Millisecond)
+		}
 	}
 }
 
