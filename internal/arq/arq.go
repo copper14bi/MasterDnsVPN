@@ -513,6 +513,16 @@ func (a *ARQ) signalWindowNotFull() {
 }
 
 func (a *ARQ) waitWindowNotFull() {
+	timer := time.NewTimer(200 * time.Millisecond)
+	defer func() {
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+	}()
+
 	for {
 		a.mu.RLock()
 		if len(a.sndBuf) < a.limit || a.closed {
@@ -521,8 +531,17 @@ func (a *ARQ) waitWindowNotFull() {
 		}
 		a.mu.RUnlock()
 
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+		timer.Reset(200 * time.Millisecond)
+
 		select {
 		case <-a.windowNotFull:
+		case <-timer.C:
 		case <-a.ctx.Done():
 			return
 		}
@@ -1015,6 +1034,16 @@ func (a *ARQ) emitTerminalPacketWithTTL(packetType uint8, reason string, ttl tim
 func (a *ARQ) retransmitLoop() {
 	defer a.wg.Done()
 
+	timer := time.NewTimer(100 * time.Millisecond)
+	defer func() {
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+	}()
+
 	for {
 		a.mu.Lock()
 		rtoFactor := a.rto
@@ -1032,15 +1061,15 @@ func (a *ARQ) retransmitLoop() {
 			interval = max(baseInterval*4, 100*time.Millisecond)
 		}
 
-		timer := time.NewTimer(interval)
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+		timer.Reset(interval)
 		select {
 		case <-a.ctx.Done():
-			if !timer.Stop() {
-				select {
-				case <-timer.C:
-				default:
-				}
-			}
 			return
 		case <-timer.C:
 		}
