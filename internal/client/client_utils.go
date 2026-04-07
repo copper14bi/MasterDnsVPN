@@ -189,13 +189,6 @@ func (c *Client) Log() *logger.Logger {
 	return c.log
 }
 
-func (c *Client) GetConnectionByKey(key string) (Connection, bool) {
-	if c == nil || c.balancer == nil || key == "" {
-		return Connection{}, false
-	}
-	return c.balancer.GetConnectionByKey(key)
-}
-
 func orphanResetKey(packetType uint8, streamID uint16) uint64 {
 	return Enums.PacketTypeStreamKey(streamID, packetType)
 }

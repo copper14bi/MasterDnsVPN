@@ -49,6 +49,8 @@ type balancerStreamRouteState struct {
 	PreferredResolverKey string
 	ResendStreak         int
 	LastFailoverAt       time.Time
+	CachedTargetKeys     []string
+	CachedRequiredCount  int
 }
 
 type balancerResolverSampleKey struct {
@@ -75,7 +77,6 @@ type Balancer struct {
 	rrCounter       atomic.Uint64
 	healthRRCounter atomic.Uint64
 	rngState        atomic.Uint64
-	version         atomic.Uint64
 
 	mu           sync.RWMutex
 	connections  []Connection
@@ -177,7 +178,6 @@ func (b *Balancer) SetConnections(connections []*Connection) {
 		b.stats = append(b.stats, &connectionStats{})
 	}
 
-	b.version.Add(1)
 }
 
 func (b *Balancer) ActiveCount() int {
@@ -222,7 +222,6 @@ func (b *Balancer) SetConnectionValidity(key string, valid bool) bool {
 		b.clearPreferredResolverReferencesLocked(key)
 	}
 	b.moveConnectionStateLocked(idx, valid)
-	b.version.Add(1)
 	return true
 }
 
@@ -264,7 +263,6 @@ func (b *Balancer) ApplyMTUProbeResult(key string, uploadBytes int, uploadChars 
 	}
 	if wasValid != active {
 		b.moveConnectionStateLocked(idx, active)
-		b.version.Add(1)
 	}
 	return true
 }
@@ -361,20 +359,6 @@ func (b *Balancer) ReportTimeoutWindow(serverKey string, now time.Time, window t
 	if idx, ok := b.indexByKey[serverKey]; ok {
 		b.moveConnectionStateLocked(idx, false)
 	}
-	b.version.Add(1)
-	return true
-}
-
-func (b *Balancer) ResetConnectionWindow(serverKey string) bool {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-
-	conn, ok := b.connectionByKeyLocked(serverKey)
-	if !ok {
-		return false
-	}
-
-	b.resetWindowLocked(conn)
 	return true
 }
 
@@ -655,24 +639,16 @@ func (b *Balancer) GetUniqueConnections(requiredCount int) []Connection {
 	}
 }
 
-func (b *Balancer) GetAllActiveConnections() []Connection {
+func (b *Balancer) ActiveConnections() []Connection {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	return b.connectionsByIDsLocked(b.activeIDs)
 }
 
-func (b *Balancer) GetAllInactiveConnections() []Connection {
+func (b *Balancer) InactiveConnections() []Connection {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	return b.connectionsByIDsLocked(b.inactiveIDs)
-}
-
-func (b *Balancer) ActiveConnections() []Connection {
-	return b.GetAllActiveConnections()
-}
-
-func (b *Balancer) InactiveConnections() []Connection {
-	return b.GetAllInactiveConnections()
 }
 
 func (b *Balancer) AllConnections() []Connection {
@@ -779,6 +755,10 @@ func (b *Balancer) SelectTargets(packetType uint8, streamID uint16, requiredCoun
 		return []Connection{preferred}, nil
 	}
 
+	if cached, ok := b.cachedTargetsForStreamLocked(state, preferred.Key, requiredCount); ok {
+		return cached, nil
+	}
+
 	selected := make([]Connection, 0, requiredCount)
 	selected = append(selected, preferred)
 	for _, conn := range b.getUniqueConnectionsLocked(requiredCount) {
@@ -794,6 +774,7 @@ func (b *Balancer) SelectTargets(packetType uint8, streamID uint16, requiredCoun
 	if len(selected) == 0 {
 		return nil, ErrNoValidConnections
 	}
+	b.cacheTargetsForStreamLocked(state, selected)
 	return selected, nil
 }
 
@@ -859,6 +840,7 @@ func (b *Balancer) selectPreferredConnectionForStreamLocked(packetType uint8, st
 				state.PreferredResolverKey = replacement.Key
 				state.ResendStreak = 0
 				state.LastFailoverAt = time.Now()
+				b.clearCachedTargetsForStreamLocked(state)
 				return replacement, true
 			}
 			return current, true
@@ -875,6 +857,7 @@ func (b *Balancer) selectPreferredConnectionForStreamLocked(packetType uint8, st
 	}
 	state.PreferredResolverKey = replacement.Key
 	state.ResendStreak = 0
+	b.clearCachedTargetsForStreamLocked(state)
 	return replacement, true
 }
 
@@ -919,6 +902,7 @@ func (b *Balancer) clearPreferredResolverReferencesLocked(serverKey string) {
 		}
 		state.PreferredResolverKey = ""
 		state.ResendStreak = 0
+		b.clearCachedTargetsForStreamLocked(state)
 	}
 }
 
@@ -930,6 +914,66 @@ func (b *Balancer) moveConnectionStateLocked(idx int, valid bool) {
 	}
 	b.removeActiveIndexLocked(idx)
 	b.addInactiveIndexLocked(idx)
+}
+
+func (b *Balancer) clearCachedTargetsForStreamLocked(state *balancerStreamRouteState) {
+	if state == nil {
+		return
+	}
+
+	state.CachedTargetKeys = nil
+	state.CachedRequiredCount = 0
+}
+
+func (b *Balancer) cacheTargetsForStreamLocked(state *balancerStreamRouteState, selected []Connection) {
+	if state == nil || len(selected) <= 1 {
+		b.clearCachedTargetsForStreamLocked(state)
+		return
+	}
+
+	keys := make([]string, 0, len(selected))
+
+	for _, conn := range selected {
+		if conn.Key == "" || !conn.IsValid {
+			b.clearCachedTargetsForStreamLocked(state)
+			return
+		}
+		keys = append(keys, conn.Key)
+	}
+
+	state.CachedTargetKeys = keys
+	state.CachedRequiredCount = len(keys)
+}
+
+func (b *Balancer) cachedTargetsForStreamLocked(state *balancerStreamRouteState, preferredKey string, requiredCount int) ([]Connection, bool) {
+	if state == nil || requiredCount <= 1 {
+		return nil, false
+	}
+	if state.CachedRequiredCount != requiredCount || len(state.CachedTargetKeys) != requiredCount {
+		return nil, false
+	}
+	if len(state.CachedTargetKeys) == 0 || state.CachedTargetKeys[0] != preferredKey {
+		return nil, false
+	}
+	selected := make([]Connection, 0, requiredCount)
+	seen := make(map[string]struct{}, requiredCount)
+	for _, key := range state.CachedTargetKeys {
+		conn, ok := b.connectionByKeyLocked(key)
+		if !ok || !conn.IsValid || conn.Key == "" {
+			return nil, false
+		}
+		if _, exists := seen[conn.Key]; exists {
+			return nil, false
+		}
+		seen[conn.Key] = struct{}{}
+		selected = append(selected, *conn)
+	}
+
+	if len(selected) != requiredCount {
+		return nil, false
+	}
+
+	return selected, true
 }
 
 func (b *Balancer) addActiveIndexLocked(idx int) {
