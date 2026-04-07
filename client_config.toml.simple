@@ -159,11 +159,11 @@ AUTO_DISABLE_TIMEOUT_WINDOW_SECONDS = 30.0
 
 # Minimum observations required before auto-disable can trigger.
 # Clamped to [1, 10000].
-AUTO_DISABLE_MIN_OBSERVATIONS = 5
+AUTO_DISABLE_MIN_OBSERVATIONS = 100
 
 # Frequency of auto-disable evaluation.
 # Clamped to [0.25s, 600s].
-AUTO_DISABLE_CHECK_INTERVAL_SECONDS = 2.0
+AUTO_DISABLE_CHECK_INTERVAL_SECONDS = 4.0
 
 # If true, payload labels are base-encoded before tunneling.
 # Usually keep false unless a specific resolver path behaves better with it.
