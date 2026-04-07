@@ -18,6 +18,7 @@ import (
 	"time"
 
 	Enums "masterdnsvpn-go/internal/enums"
+	"masterdnsvpn-go/internal/logger"
 )
 
 const (
@@ -79,6 +80,7 @@ type Balancer struct {
 	nextPendingSweep atomic.Int64
 
 	mu           sync.RWMutex
+	log          *logger.Logger
 	connections  []Connection
 	indexByKey   map[string]int
 	activeIDs    []int
@@ -101,15 +103,17 @@ type Balancer struct {
 type connectionStats struct {
 	sent         atomic.Uint64
 	acked        atomic.Uint64
+	lost         atomic.Uint64
 	rttMicrosSum atomic.Uint64
 	rttCount     atomic.Uint64
 }
 
 const connectionStatsHalfLifeThreshold = 1000
 
-func NewBalancer(strategy int) *Balancer {
+func NewBalancer(strategy int, log *logger.Logger) *Balancer {
 	b := &Balancer{
 		strategy:                strategy,
+		log:                     log,
 		streamRoutes:            make(map[uint16]*balancerStreamRouteState),
 		pending:                 make(map[balancerResolverSampleKey]balancerResolverSample),
 		streamFailoverThreshold: 1,
@@ -241,6 +245,13 @@ func (b *Balancer) SetConnectionValidity(key string, valid bool) bool {
 		b.clearPreferredResolverReferencesLocked(key)
 	}
 	b.moveConnectionStateLocked(idx, valid)
+
+	if b.log != nil && valid {
+		conn := &b.connections[idx]
+		b.log.Infof("<green>DNS Resolver Reactivated: %s (%s) | %s | Total Active: %d</green>",
+			conn.ResolverLabel, conn.Domain, conn.Resolver, len(b.activeIDs))
+	}
+
 	return true
 }
 
@@ -282,6 +293,11 @@ func (b *Balancer) ApplyMTUProbeResult(key string, uploadBytes int, uploadChars 
 	}
 	if wasValid != active {
 		b.moveConnectionStateLocked(idx, active)
+
+		if b.log != nil && active {
+			b.log.Infof("<green>DNS Resolver Reactivated (Health Check): %s (%s) | %s | Total Active: %d</green>",
+				conn.ResolverLabel, conn.Domain, conn.Resolver, len(b.activeIDs))
+		}
 	}
 	return true
 }
@@ -307,7 +323,12 @@ func (b *Balancer) ReportSuccess(serverKey string, rtt time.Duration) {
 	stats.applyHalfLife()
 }
 
-func (b *Balancer) ReportTimeoutWindow(serverKey string, now time.Time, window time.Duration, minObservations int, minActive int) bool {
+func (b *Balancer) ReportTimeout(serverKey string, now time.Time, window time.Duration, minObservations int, minActive int) bool {
+	if stats := b.statsForKey(serverKey); stats != nil {
+		stats.lost.Add(1)
+		stats.applyHalfLife()
+	}
+
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -326,8 +347,9 @@ func (b *Balancer) ReportTimeoutWindow(serverKey string, now time.Time, window t
 	if minActive < 0 {
 		minActive = 0
 	}
-	if minActive < 3 {
-		minActive = 3
+
+	if minActive < 2 {
+		minActive = 2
 	}
 
 	if int(conn.WindowSent) < minObservations {
@@ -345,13 +367,27 @@ func (b *Balancer) ReportTimeoutWindow(serverKey string, now time.Time, window t
 	conn.IsValid = false
 	b.resetWindowLocked(conn)
 	b.clearPreferredResolverReferencesLocked(serverKey)
+
 	if idx, ok := b.indexByKey[serverKey]; ok {
 		b.moveConnectionStateLocked(idx, false)
 	}
+
+	if b.log != nil {
+		b.log.Warnf("<red>DNS Resolver disabled (100%% Loss): %s (%s) | %s | Remaining: %d</red>",
+			conn.ResolverLabel, conn.Domain, conn.Resolver, len(b.activeIDs))
+	}
+
 	return true
 }
 
-func (b *Balancer) RetractTimeoutWindow(serverKey string, now time.Time, window time.Duration) bool {
+func (b *Balancer) RetractTimeout(serverKey string, now time.Time, window time.Duration) bool {
+	if stats := b.statsForKey(serverKey); stats != nil {
+		current := stats.lost.Load()
+		if current > 0 {
+			stats.lost.Add(^uint64(0)) // Atomic decrement
+		}
+	}
+
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -411,7 +447,7 @@ func (b *Balancer) TrackResolverSend(
 	b.pendingMu.Unlock()
 
 	for _, observation := range timeoutObservations {
-		b.ReportTimeoutWindow(observation.serverKey, observation.at, window, 1, 1)
+		b.ReportTimeout(observation.serverKey, observation.at, window, 1, 1)
 	}
 
 	b.ReportSend(serverKey)
@@ -455,7 +491,7 @@ func (b *Balancer) TrackResolverSuccess(
 		return
 	}
 	if sample.timedOut && !sample.timedOutAt.IsZero() {
-		b.RetractTimeoutWindow(sample.serverKey, receivedAt, window)
+		b.RetractTimeout(sample.serverKey, receivedAt, window)
 	}
 	if !sample.sentAt.IsZero() && !receivedAt.Before(sample.sentAt) {
 		rtt = receivedAt.Sub(sample.sentAt)
@@ -497,7 +533,7 @@ func (b *Balancer) TrackResolverFailure(
 	if !ok || sample.serverKey == "" || sample.timedOut || !autoDisable {
 		return
 	}
-	b.ReportTimeoutWindow(sample.serverKey, failedAt, window, minObservations, 1)
+	b.ReportTimeout(sample.serverKey, failedAt, window, minObservations, 1)
 }
 
 func (b *Balancer) CollectExpiredResolverTimeouts(
@@ -531,7 +567,7 @@ func (b *Balancer) CollectExpiredResolverTimeouts(
 	b.pendingMu.Unlock()
 
 	for _, observation := range timeoutObservations {
-		b.ReportTimeoutWindow(observation.serverKey, observation.at, window, minObservations, 1)
+		b.ReportTimeout(observation.serverKey, observation.at, window, minObservations, 1)
 	}
 }
 
@@ -543,6 +579,7 @@ func (b *Balancer) ResetServerStats(serverKey string) {
 
 	stats.sent.Store(0)
 	stats.acked.Store(0)
+	stats.lost.Store(0)
 	stats.rttMicrosSum.Store(0)
 	stats.rttCount.Store(0)
 }
@@ -555,6 +592,7 @@ func (b *Balancer) SeedConservativeStats(serverKey string) {
 
 	stats.sent.Store(10)
 	stats.acked.Store(8)
+	stats.lost.Store(0)
 	stats.rttMicrosSum.Store(0)
 	stats.rttCount.Store(0)
 }
@@ -761,7 +799,7 @@ func (b *Balancer) AverageRTT(serverKey string) (time.Duration, bool) {
 		return 0, false
 	}
 
-	_, _, sum, count := stats.snapshot()
+	_, _, _, sum, count := stats.snapshot()
 	if count == 0 {
 		return 0, false
 	}
@@ -1466,7 +1504,7 @@ func (b *Balancer) hasLossSignalLocked() bool {
 		if stats == nil {
 			continue
 		}
-		sent, _, _, _ := stats.snapshot()
+		sent, _, _, _, _ := stats.snapshot()
 		if sent >= 5 {
 			return true
 		}
@@ -1480,7 +1518,7 @@ func (b *Balancer) hasLatencySignalLocked() bool {
 		if stats == nil {
 			continue
 		}
-		_, _, _, count := stats.snapshot()
+		_, _, _, _, count := stats.snapshot()
 		if count >= 5 {
 			return true
 		}
@@ -1490,39 +1528,40 @@ func (b *Balancer) hasLatencySignalLocked() bool {
 
 func (b *Balancer) lossScoreLocked(idx int) uint64 {
 	if idx < 0 || idx >= len(b.stats) || b.stats[idx] == nil {
-		return 500
+		return 200 // Use a more neutral default for unknown
 	}
-	sent, acked, _, _ := b.stats[idx].snapshot()
+	sent, _, lost, _, _ := b.stats[idx].snapshot()
 	if sent < 5 {
-		return 500
+		return 200 // Initial probation
 	}
-	if acked >= sent {
+	if lost == 0 {
 		return 0
 	}
-	return (sent - acked) * 1000 / sent
+	return (lost * 1000) / sent
 }
 
 func (b *Balancer) latencyScoreLocked(idx int) uint64 {
 	if idx < 0 || idx >= len(b.stats) || b.stats[idx] == nil {
 		return 999000
 	}
-	_, _, sum, count := b.stats[idx].snapshot()
+	_, _, _, sum, count := b.stats[idx].snapshot()
 	if count < 5 {
 		return 999000
 	}
 	return sum / count
 }
 
-func (s *connectionStats) snapshot() (sent uint64, acked uint64, rttMicrosSum uint64, rttCount uint64) {
+func (s *connectionStats) snapshot() (sent uint64, acked uint64, lost uint64, rttMicrosSum uint64, rttCount uint64) {
 	if s == nil {
-		return 0, 0, 0, 0
+		return 0, 0, 0, 0, 0
 	}
 
 	sent = s.sent.Load()
 	acked = s.acked.Load()
+	lost = s.lost.Load()
 	rttMicrosSum = s.rttMicrosSum.Load()
 	rttCount = s.rttCount.Load()
-	return sent, acked, rttMicrosSum, rttCount
+	return sent, acked, lost, rttMicrosSum, rttCount
 }
 
 func (s *connectionStats) applyHalfLife() {
@@ -1532,18 +1571,19 @@ func (s *connectionStats) applyHalfLife() {
 
 	sent := s.sent.Load()
 	acked := s.acked.Load()
+	lost := s.lost.Load()
 	rttCount := s.rttCount.Load()
 
 	if sent <= connectionStatsHalfLifeThreshold &&
 		acked <= connectionStatsHalfLifeThreshold &&
+		lost <= connectionStatsHalfLifeThreshold &&
 		rttCount <= connectionStatsHalfLifeThreshold {
 		return
 	}
 
-	// For atomics without a lock, halving might lose a concurrent increment.
-	// Since stats are only statistical decay, this is perfectly acceptable.
 	s.sent.Store(sent / 2)
 	s.acked.Store(acked / 2)
+	s.lost.Store(lost / 2)
 	s.rttMicrosSum.Store(s.rttMicrosSum.Load() / 2)
 	s.rttCount.Store(rttCount / 2)
 }

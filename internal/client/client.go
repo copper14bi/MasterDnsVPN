@@ -215,7 +215,7 @@ func New(cfg config.ClientConfig, log *logger.Logger, codec *security.Codec) *Cl
 		cfg:                 cfg,
 		log:                 log,
 		codec:               codec,
-		balancer:            NewBalancer(cfg.ResolverBalancingStrategy),
+		balancer:            NewBalancer(cfg.ResolverBalancingStrategy, log),
 		uploadCompression:   uint8(cfg.UploadCompressionType),
 		downloadCompression: uint8(cfg.DownloadCompressionType),
 		mtuCryptoOverhead:   mtuCryptoOverhead(cfg.DataEncryptionMethod),

@@ -6,7 +6,7 @@ import (
 )
 
 func TestBalancerLeastLossFallsBackToRoundRobinWithoutStats(t *testing.T) {
-	b := NewBalancer(BalancingLeastLoss)
+	b := NewBalancer(BalancingLeastLoss, nil)
 	connections := []*Connection{
 		{Key: "a", IsValid: true},
 		{Key: "b", IsValid: true},
@@ -36,7 +36,7 @@ func TestBalancerLeastLossFallsBackToRoundRobinWithoutStats(t *testing.T) {
 }
 
 func TestBalancerLowestLatencyUsesRuntimeStats(t *testing.T) {
-	b := NewBalancer(BalancingLowestLatency)
+	b := NewBalancer(BalancingLowestLatency, nil)
 	connections := []*Connection{
 		{Key: "a", IsValid: true},
 		{Key: "b", IsValid: true},
@@ -62,7 +62,7 @@ func TestBalancerLowestLatencyUsesRuntimeStats(t *testing.T) {
 }
 
 func TestBalancerStatsHalfLifeAlsoAppliesOnSend(t *testing.T) {
-	b := NewBalancer(BalancingLeastLoss)
+	b := NewBalancer(BalancingLeastLoss, nil)
 	connections := []*Connection{
 		{Key: "a", IsValid: true},
 	}
@@ -77,7 +77,7 @@ func TestBalancerStatsHalfLifeAlsoAppliesOnSend(t *testing.T) {
 		t.Fatal("expected stats for resolver a")
 	}
 
-	sent, acked, sum, count := stats.snapshot()
+	sent, acked, _, sum, count := stats.snapshot()
 	if sent != (connectionStatsHalfLifeThreshold+1)/2 {
 		t.Fatalf("expected send-triggered half-life to bound sent, got sent=%d acked=%d sum=%d count=%d", sent, acked, sum, count)
 	}
@@ -87,7 +87,7 @@ func TestBalancerStatsHalfLifeAlsoAppliesOnSend(t *testing.T) {
 }
 
 func TestBalancerStatsHalfLifePreservesRelativeSuccessSignal(t *testing.T) {
-	b := NewBalancer(BalancingLeastLoss)
+	b := NewBalancer(BalancingLeastLoss, nil)
 	connections := []*Connection{
 		{Key: "a", IsValid: true},
 	}
@@ -108,7 +108,7 @@ func TestBalancerStatsHalfLifePreservesRelativeSuccessSignal(t *testing.T) {
 		t.Fatal("expected stats for resolver a")
 	}
 
-	sent, acked, sum, count := stats.snapshot()
+	sent, acked, _, sum, count := stats.snapshot()
 	if sent != 700 || acked != 200 || count != 200 {
 		t.Fatalf("expected balanced half-life after crossing threshold, got sent=%d acked=%d count=%d", sent, acked, count)
 	}
@@ -118,7 +118,7 @@ func TestBalancerStatsHalfLifePreservesRelativeSuccessSignal(t *testing.T) {
 }
 
 func TestBalancerSetConnectionsCopiesSourceDomain(t *testing.T) {
-	b := NewBalancer(BalancingRoundRobinDefault)
+	b := NewBalancer(BalancingRoundRobinDefault, nil)
 	connections := []*Connection{
 		{Key: "a", IsValid: true, Domain: "a.example.com"},
 	}
@@ -136,7 +136,7 @@ func TestBalancerSetConnectionsCopiesSourceDomain(t *testing.T) {
 }
 
 func TestBalancerSetConnectionValidityDoesNotPullSourceMutation(t *testing.T) {
-	b := NewBalancer(BalancingRoundRobinDefault)
+	b := NewBalancer(BalancingRoundRobinDefault, nil)
 	connections := []*Connection{
 		{Key: "a", IsValid: false, UploadMTUBytes: 140, DownloadMTUBytes: 220},
 	}
@@ -162,7 +162,7 @@ func TestBalancerSetConnectionValidityDoesNotPullSourceMutation(t *testing.T) {
 }
 
 func TestBalancerSetConnectionMTUUpdatesBalancerOnly(t *testing.T) {
-	b := NewBalancer(BalancingRoundRobinDefault)
+	b := NewBalancer(BalancingRoundRobinDefault, nil)
 	connections := []*Connection{
 		{Key: "a", IsValid: true, UploadMTUBytes: 120, UploadMTUChars: 180, DownloadMTUBytes: 220},
 	}
