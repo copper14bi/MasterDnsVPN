@@ -531,7 +531,7 @@ func (c *Client) asyncPlanEncodeWorker(ctx context.Context, id int) {
 			}
 
 			if len(conns) == 0 {
-				c.handlePlannerTaskWithoutConnections(task)
+				c.applyPlannerNoConnectionPolicy(task)
 				continue
 			}
 
@@ -573,13 +573,26 @@ func (c *Client) asyncPlanEncodeWorker(ctx context.Context, id int) {
 	}
 }
 
-func (c *Client) handlePlannerTaskWithoutConnections(task plannerTask) {
-	if task.opts.PacketType != Enums.PACKET_STREAM_DATA && task.opts.PacketType != Enums.PACKET_STREAM_RESEND {
-		if !task.wasPacked && task.selected != nil {
-			task.selected.ReleaseTXPacket(task.item)
-		}
-		return
+func (c *Client) applyPlannerNoConnectionPolicy(task plannerTask) {
+	switch {
+	case c.shouldRetainPlannerTaskWithoutConnection(task):
+		c.requeuePlannerTaskForRetry(task)
+	case c.shouldDropPlannerTaskWithoutConnection(task):
+		c.releasePlannerTask(task)
+	default:
+		c.releasePlannerTask(task)
 	}
+}
+
+func (c *Client) shouldRetainPlannerTaskWithoutConnection(task plannerTask) bool {
+	return task.opts.PacketType == Enums.PACKET_STREAM_DATA || task.opts.PacketType == Enums.PACKET_STREAM_RESEND
+}
+
+func (c *Client) shouldDropPlannerTaskWithoutConnection(task plannerTask) bool {
+	return !c.shouldRetainPlannerTaskWithoutConnection(task)
+}
+
+func (c *Client) requeuePlannerTaskForRetry(task plannerTask) {
 	if task.selected == nil || task.item == nil || task.wasPacked {
 		return
 	}
@@ -593,7 +606,13 @@ func (c *Client) handlePlannerTaskWithoutConnections(task plannerTask) {
 		task.item.TTL,
 		task.item.Payload,
 	)
-	task.selected.ReleaseTXPacket(task.item)
+	c.releasePlannerTask(task)
+}
+
+func (c *Client) releasePlannerTask(task plannerTask) {
+	if !task.wasPacked && task.selected != nil {
+		task.selected.ReleaseTXPacket(task.item)
+	}
 }
 
 func (c *Client) waitForWriterCapacity(ctx context.Context, task plannerTask, requiredWriterSlots int) bool {

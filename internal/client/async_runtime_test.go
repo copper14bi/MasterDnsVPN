@@ -19,7 +19,9 @@ import (
 	DnsParser "masterdnsvpn-go/internal/dnsparser"
 	Enums "masterdnsvpn-go/internal/enums"
 	"masterdnsvpn-go/internal/logger"
+	"masterdnsvpn-go/internal/mlq"
 	"masterdnsvpn-go/internal/security"
+	VpnProto "masterdnsvpn-go/internal/vpnproto"
 )
 
 func createTestClient(t *testing.T) *Client {
@@ -175,6 +177,59 @@ func TestDrainQueues(t *testing.T) {
 	}
 	if len(c.rxChannel) != 0 {
 		t.Errorf("expected rxChannel empty, got %d", len(c.rxChannel))
+	}
+}
+
+func TestApplyPlannerNoConnectionPolicyDropsControlTask(t *testing.T) {
+	c := createTestClient(t)
+	stream := &Stream_client{client: c, StreamID: 9}
+	item := &clientStreamTXPacket{
+		PacketType: Enums.PACKET_STREAM_SYN,
+		Payload:    []byte("syn"),
+	}
+
+	c.applyPlannerNoConnectionPolicy(plannerTask{
+		opts:     VpnProto.BuildOptions{PacketType: Enums.PACKET_STREAM_SYN, StreamID: stream.StreamID},
+		item:     item,
+		selected: stream,
+	})
+
+	if item.Payload != nil {
+		t.Fatal("expected control task to be released when no connection is available")
+	}
+}
+
+func TestApplyPlannerNoConnectionPolicyRequeuesDataTask(t *testing.T) {
+	c := createTestClient(t)
+	stream := &Stream_client{
+		client:   c,
+		StreamID: 10,
+		txQueue:  mlq.New[*clientStreamTXPacket](8),
+	}
+	item := &clientStreamTXPacket{
+		PacketType: Enums.PACKET_STREAM_DATA,
+		SequenceNum: 7,
+		Payload:    []byte("data"),
+	}
+
+	c.applyPlannerNoConnectionPolicy(plannerTask{
+		opts:     VpnProto.BuildOptions{PacketType: Enums.PACKET_STREAM_DATA, StreamID: stream.StreamID},
+		item:     item,
+		selected: stream,
+	})
+
+	if item.Payload != nil {
+		t.Fatal("expected original dequeued data task to be released after requeue")
+	}
+	if stream.txQueue == nil || stream.txQueue.FastSize() != 1 {
+		t.Fatalf("expected data task to be requeued, got queue size %d", stream.txQueue.FastSize())
+	}
+	queued, _, ok := stream.txQueue.Peek()
+	if !ok || queued == nil {
+		t.Fatal("expected requeued packet to be present")
+	}
+	if queued.PacketType != Enums.PACKET_STREAM_DATA || queued.SequenceNum != 7 {
+		t.Fatalf("unexpected requeued packet: type=%d seq=%d", queued.PacketType, queued.SequenceNum)
 	}
 }
 

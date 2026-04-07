@@ -116,12 +116,12 @@ LOCAL_DNS_CACHE_FLUSH_INTERVAL_SECONDS = 60.0
 RESOLVER_BALANCING_STRATEGY = 2
 
 # Duplicate each normal outgoing tunnel packet this many times.
-# Clamped in code to [1, 8].
+# Clamped in code to [1, 4].
 # Higher values improve resilience but increase bandwidth and CPU usage.
 PACKET_DUPLICATION_COUNT = 2
 
 # Duplicate stream setup packets (STREAM_SYN / SOCKS5_SYN) this many times.
-# Clamped in code to [PACKET_DUPLICATION_COUNT, 8].
+# Clamped in code to [PACKET_DUPLICATION_COUNT, 5].
 SETUP_PACKET_DUPLICATION_COUNT = 2
 
 # Stream-aware resolver failover.
@@ -184,7 +184,7 @@ UPLOAD_COMPRESSION_TYPE = 0
 DOWNLOAD_COMPRESSION_TYPE = 0
 
 # Minimum payload size before compression is attempted.
-# Must be >= 1.
+# Must be >= 100.
 COMPRESSION_MIN_SIZE = 120
 
 # ------------------------------------------------------------------------------
