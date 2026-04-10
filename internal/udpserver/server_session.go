@@ -695,6 +695,8 @@ func (s *Server) handleSessionInitRequest(questionPacket []byte, decision domain
 		resolvedUpload,
 		resolvedDownload,
 		s.cfg.EffectiveMaxPacketsPerBatch(),
+		s.cfg.ClientMaxUploadMTU,
+		s.cfg.ClientMaxDownloadMTU,
 	)
 	if err != nil {
 		if err == ErrSessionTableFull {

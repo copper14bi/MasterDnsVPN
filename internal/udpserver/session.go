@@ -221,7 +221,14 @@ func newSessionStore(orphanQueueCap int, streamQueueCap int, options ...any) *se
 	}
 }
 
-func (s *sessionStore) findOrCreate(payload []byte, uploadCompressionType uint8, downloadCompressionType uint8, maxPacketsPerBatch int) (*sessionRecord, bool, error) {
+func (s *sessionStore) findOrCreate(
+	payload []byte,
+	uploadCompressionType uint8,
+	downloadCompressionType uint8,
+	maxPacketsPerBatch int,
+	maxClientUploadMTU int,
+	maxClientDownloadMTU int,
+) (*sessionRecord, bool, error) {
 	if len(payload) != sessionInitDataSize || !isValidSessionResponseMode(payload[0]) {
 		return nil, false, nil
 	}
@@ -276,6 +283,8 @@ func (s *sessionStore) findOrCreate(payload []byte, uploadCompressionType uint8,
 		binary.BigEndian.Uint16(payload[2:4]),
 		binary.BigEndian.Uint16(payload[4:6]),
 		maxPacketsPerBatch,
+		maxClientUploadMTU,
+		maxClientDownloadMTU,
 	)
 	copy(record.VerifyCode[:], payload[6:10])
 	record.Cookie = s.randomCookieLocked()
@@ -625,14 +634,42 @@ func nextSessionID(current uint8) uint8 {
 	return current + 1
 }
 
-func (r *sessionRecord) applyMTUFromSessionInit(uploadMTU uint16, downloadMTU uint16, maxPacketsPerBatch int) {
+func (r *sessionRecord) applyMTUFromSessionInit(
+	uploadMTU uint16,
+	downloadMTU uint16,
+	maxPacketsPerBatch int,
+	maxClientUploadMTU int,
+	maxClientDownloadMTU int,
+) {
 	if r == nil {
 		return
 	}
-	r.UploadMTU = clampMTU(uploadMTU)
-	r.DownloadMTU = clampMTU(downloadMTU)
+
+	effectiveUploadMax := clampSessionInitAllowedMTU(maxClientUploadMTU)
+	effectiveDownloadMax := clampSessionInitAllowedMTU(maxClientDownloadMTU)
+
+	r.UploadMTU = clampMTUToLimit(uploadMTU, effectiveUploadMax)
+	r.DownloadMTU = clampMTUToLimit(downloadMTU, effectiveDownloadMax)
 	r.DownloadMTUBytes = int(r.DownloadMTU)
 	r.MaxPackedBlocks = VpnProto.CalculateMaxPackedBlocks(r.DownloadMTUBytes, 80, maxPacketsPerBatch)
+}
+
+func clampMTUToLimit(value uint16, maxAllowed uint16) uint16 {
+	clamped := clampMTU(value)
+	if clamped > maxAllowed {
+		return maxAllowed
+	}
+	return clamped
+}
+
+func clampSessionInitAllowedMTU(value int) uint16 {
+	if value < minSessionMTU {
+		return minSessionMTU
+	}
+	if value > maxSessionMTU {
+		return maxSessionMTU
+	}
+	return uint16(value)
 }
 
 func (r *sessionRecord) runtimeView() sessionRuntimeView {
