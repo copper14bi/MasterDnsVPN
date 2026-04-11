@@ -274,3 +274,27 @@ func TestLoadServerConfigFromJSONBase64AppliesDefaults(t *testing.T) {
 		t.Fatalf("expected default max packets per batch to apply: got=%d want=%d", cfg.MaxPacketsPerBatch, defaultServerConfig().MaxPacketsPerBatch)
 	}
 }
+
+func TestLoadServerConfigFromJSONBase64WithOverridesAppliesBeforeFinalize(t *testing.T) {
+	rawJSON := `{
+  "PROTOCOL_TYPE": "SOCKS5",
+  "UDP_PORT": 5301,
+  "DATA_ENCRYPTION_METHOD": 1,
+  "SUPPORTED_UPLOAD_COMPRESSION_TYPES": [0, 3],
+  "SUPPORTED_DOWNLOAD_COMPRESSION_TYPES": [0, 3]
+}`
+	encoded := base64.StdEncoding.EncodeToString([]byte(rawJSON))
+
+	cfg, err := LoadServerConfigFromJSONBase64WithOverrides(encoded, ServerConfigOverrides{
+		Values: map[string]any{
+			"Domain": []string{"override.example.com"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("LoadServerConfigFromJSONBase64WithOverrides returned error: %v", err)
+	}
+
+	if len(cfg.Domain) != 1 || cfg.Domain[0] != "override.example.com" {
+		t.Fatalf("unexpected override domain: %+v", cfg.Domain)
+	}
+}

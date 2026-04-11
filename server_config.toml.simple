@@ -254,7 +254,7 @@ ARQ_TERMINAL_ACK_WAIT_TIMEOUT_SECONDS = 90.0
 # ------------------------------------------------------------------------------
 
 MAX_ALLOWED_CLIENT_ACTIVE_SESSION = 255
-MAX_ALLOWED_CLIENT_ACTIVE_STREAMS_PER_SESSION = 1000
+MAX_ALLOWED_CLIENT_ACTIVE_STREAMS_PER_SESSION = 2000
 
 # ------------------------------------------------------------------------------
 # 8.1) Client Policy Sync Limits

@@ -225,6 +225,14 @@ func loadServerConfigFile(filename string) (ServerConfig, error) {
 }
 
 func LoadServerConfigFromJSONBase64(encoded string) (ServerConfig, error) {
+	cfg, err := loadServerConfigFromJSONBase64(encoded)
+	if err != nil {
+		return cfg, err
+	}
+	return finalizeServerConfig(cfg)
+}
+
+func loadServerConfigFromJSONBase64(encoded string) (ServerConfig, error) {
 	cfg := defaultServerConfig()
 	raw, err := decodeBase64ConfigJSON(encoded)
 	if err != nil {
@@ -235,7 +243,7 @@ func LoadServerConfigFromJSONBase64(encoded string) (ServerConfig, error) {
 	}
 	cfg.ConfigDir = currentWorkingConfigDir()
 	cfg.ConfigPath = "<json_base64>"
-	return finalizeServerConfig(cfg)
+	return cfg, nil
 }
 
 func LoadServerConfigWithOverrides(filename string, overrides ServerConfigOverrides) (ServerConfig, error) {
@@ -252,7 +260,7 @@ func LoadServerConfigWithOverrides(filename string, overrides ServerConfigOverri
 }
 
 func LoadServerConfigFromJSONBase64WithOverrides(encoded string, overrides ServerConfigOverrides) (ServerConfig, error) {
-	cfg, err := LoadServerConfigFromJSONBase64(encoded)
+	cfg, err := loadServerConfigFromJSONBase64(encoded)
 	if err != nil {
 		return cfg, err
 	}

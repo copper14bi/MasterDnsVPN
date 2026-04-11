@@ -517,3 +517,39 @@ func TestLoadClientConfigFromJSONBase64AppliesDefaultsAndLoadsResolvers(t *testi
 		t.Fatalf("expected resolvers file from cwd to be loaded, got=%d", cfg.ResolverMap["1.1.1.1"])
 	}
 }
+
+func TestLoadClientConfigFromJSONBase64WithOverridesAppliesBeforeFinalize(t *testing.T) {
+	dir := t.TempDir()
+	overrideResolversPath := filepath.Join(dir, "override_resolvers.txt")
+
+	if err := os.WriteFile(overrideResolversPath, []byte("9.9.9.9\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile override resolvers failed: %v", err)
+	}
+
+	rawJSON := `{
+  "PROTOCOL_TYPE": "SOCKS5",
+  "DATA_ENCRYPTION_METHOD": 1
+}`
+	encoded := base64.StdEncoding.EncodeToString([]byte(rawJSON))
+
+	cfg, err := LoadClientConfigFromJSONBase64WithOverrides(encoded, ClientConfigOverrides{
+		ResolversFilePath: &overrideResolversPath,
+		Values: map[string]any{
+			"Domains":       []string{"override.example.com"},
+			"EncryptionKey": "override-secret",
+		},
+	})
+	if err != nil {
+		t.Fatalf("LoadClientConfigFromJSONBase64WithOverrides returned error: %v", err)
+	}
+
+	if len(cfg.Domains) != 1 || cfg.Domains[0] != "override.example.com" {
+		t.Fatalf("unexpected override domains: %+v", cfg.Domains)
+	}
+	if cfg.EncryptionKey != "override-secret" {
+		t.Fatalf("unexpected override encryption key: got=%q", cfg.EncryptionKey)
+	}
+	if cfg.ResolverMap["9.9.9.9"] != 53 {
+		t.Fatalf("expected override resolvers to be loaded, got=%d", cfg.ResolverMap["9.9.9.9"])
+	}
+}

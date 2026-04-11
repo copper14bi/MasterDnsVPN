@@ -257,6 +257,14 @@ func loadClientConfigFile(filename string) (ClientConfig, error) {
 }
 
 func LoadClientConfigFromJSONBase64(encoded string) (ClientConfig, error) {
+	cfg, err := loadClientConfigFromJSONBase64(encoded)
+	if err != nil {
+		return cfg, err
+	}
+	return finalizeClientConfig(cfg)
+}
+
+func loadClientConfigFromJSONBase64(encoded string) (ClientConfig, error) {
 	cfg := defaultClientConfig()
 	raw, err := decodeBase64ConfigJSON(encoded)
 	if err != nil {
@@ -271,7 +279,7 @@ func LoadClientConfigFromJSONBase64(encoded string) (ClientConfig, error) {
 	cfg.ResolversFilePath = ""
 	cfg.explicitRX_TX_Workers = defined["RX_TX_Workers"]
 	cfg.explicitTunnelProcessWorkers = defined["TunnelProcessWorkers"]
-	return finalizeClientConfig(cfg)
+	return cfg, nil
 }
 
 func LoadClientConfigWithOverrides(filename string, overrides ClientConfigOverrides) (ClientConfig, error) {
@@ -296,7 +304,7 @@ func LoadClientConfigWithOverrides(filename string, overrides ClientConfigOverri
 }
 
 func LoadClientConfigFromJSONBase64WithOverrides(encoded string, overrides ClientConfigOverrides) (ClientConfig, error) {
-	cfg, err := LoadClientConfigFromJSONBase64(encoded)
+	cfg, err := loadClientConfigFromJSONBase64(encoded)
 	if err != nil {
 		return cfg, err
 	}
