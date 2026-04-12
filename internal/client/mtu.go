@@ -413,7 +413,7 @@ func (c *Client) recheckInactiveResolver(ctx context.Context, conn Connection) {
 
 	conn.IsValid = true
 
-	c.appendMTUAddedServerLine(&conn)
+	c.appendMTUReactiveAddedServerLine(&conn)
 }
 
 func (c *Client) recheckResolverUploadMTU(ctx context.Context, conn Connection, transport *udpQueryTransport) bool {
