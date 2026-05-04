@@ -665,6 +665,14 @@ if ! curl -fL --retry 3 --retry-delay 2 --connect-timeout 15 -o "$ZIP_PATH" "$UR
 fi
 
 [[ -s "$ZIP_PATH" ]] || log_error "Downloaded archive is missing or empty: $ZIP_PATH"
+
+# Remove old binaries with the same prefix so executable selection is deterministic.
+shopt -s nullglob
+for old_bin in ${PREFIX}_v*; do
+  rm -f -- "$old_bin"
+done
+shopt -u nullglob
+
 unzip -q -o "$ZIP_PATH" -d "$INSTALL_DIR" || log_error "Failed to extract archive."
 log_success "Files extracted."
 
