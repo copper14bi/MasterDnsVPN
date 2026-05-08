@@ -20,10 +20,12 @@ const (
 
 func main() {
 	// Parse command-line flags
-	configPath := flag.String("config", "client_config.toml", "Path to configuration file")
+	// Changed default config path to my personal config file name
+	configPath := flag.String("config", "config.toml", "Path to configuration file")
 	mode := flag.String("mode", "client", "Run mode: client or server")
 	showVersion := flag.Bool("version", false, "Show version information")
-	verbose := flag.Bool("verbose", false, "Enable verbose logging")
+	// Default verbose to true so I can see what's happening during testing
+	verbose := flag.Bool("verbose", true, "Enable verbose logging")
 	flag.Parse()
 
 	if *showVersion {
