@@ -6,6 +6,8 @@
 This system is designed around compatibility with many resolver behaviors and harsh network conditions, with the goal of preserving the highest possible stability and data delivery even in the worst cases.
 
 > **Personal note:** I forked this for studying DNS tunneling techniques. The comparison table below is what initially caught my attention — the overhead difference vs DNSTT is significant.
+>
+> **Study notes:** The ~5–7B transport header overhead is achieved by stripping redundant framing and encoding only essential sequence/ack fields. Worth digging into the ARQ implementation to understand how retransmission is handled without inflating header size.
 
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/masterking32/MasterDnsVPN) [![oosmetrics](https://api.oosmetrics.com/api/v1/badge/achievement/5c7b2ce0-0af6-4648-8ded-fd1e847096cd.svg)](https://oosmetrics.com/repo/masterking32/MasterDnsVPN)
 
@@ -29,6 +31,4 @@ This system is designed around compatibility with many resolver behaviors and ha
 | Adaptive routing | Limited | ❌ | Advanced (latency/loss based) |
 | Design goal | High speed and efficiency | Simplicity and stability | Surviving the harshest networks — stability, speed, and efficiency |
 | Implementation language | Rust | Go | Main version is Go<br>Legacy Python version also exists |
-| Built-in balancer | 🔴 | ❌ | 🟢 (8 built-in balancing modes) |
-| Duplication system | ❌ | ❌ | Yes — increases traffic to improve reliability (configurable or can be disabled) |
-| MTU tolerance
+| 
