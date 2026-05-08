@@ -8,6 +8,8 @@ This system is designed around compatibility with many resolver behaviors and ha
 > **Personal note:** I forked this for studying DNS tunneling techniques. The comparison table below is what initially caught my attention — the overhead difference vs DNSTT is significant.
 >
 > **Study notes:** The ~5–7B transport header overhead is achieved by stripping redundant framing and encoding only essential sequence/ack fields. Worth digging into the ARQ implementation to understand how retransmission is handled without inflating header size.
+>
+> **TODO:** Cross-reference the multipath resolver logic with the QUIC multipath spec (RFC 9000) to see where the design diverges — particularly around how packet loss on one resolver path triggers duplication vs. retransmission on alternates.
 
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/masterking32/MasterDnsVPN) [![oosmetrics](https://api.oosmetrics.com/api/v1/badge/achievement/5c7b2ce0-0af6-4648-8ded-fd1e847096cd.svg)](https://oosmetrics.com/repo/masterking32/MasterDnsVPN)
 
@@ -28,7 +30,4 @@ This system is designed around compatibility with many resolver behaviors and ha
 | SOCKS5 support | Yes | Yes | Optimized for SOCKS5 / SOCKS4 with reduced SOCKS overhead |
 | Shadowsocks support | ✅ | ❌ | Indirectly: TCP Forwarding mode can carry TCP-based protocols<br>e.g. Shadowsocks, VLESS/VMess, etc. |
 | Real multipath | Yes (QUIC multipath) | ❌ | Yes (multi-resolver + duplication) |
-| Adaptive routing | Limited | ❌ | Advanced (latency/loss based) |
-| Design goal | High speed and efficiency | Simplicity and stability | Surviving the harshest networks — stability, speed, and efficiency |
-| Implementation language | Rust | Go | Main version is Go<br>Legacy Python version also exists |
-| 
+| Adaptive routing | Limited | ❌ | Advanc
