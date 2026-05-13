@@ -21,7 +21,8 @@ const (
 func main() {
 	// Parse command-line flags
 	configPath := flag.String("config", "config.toml", "Path to configuration file")
-	mode := flag.String("mode", "client", "Run mode: client or server")
+	// Changed default mode to "server" since I primarily run this as a server
+	mode := flag.String("mode", "server", "Run mode: client or server")
 	showVersion := flag.Bool("version", false, "Show version information")
 	// Default verbose to false to reduce noise in normal operation
 	verbose := flag.Bool("verbose", false, "Enable verbose logging")
